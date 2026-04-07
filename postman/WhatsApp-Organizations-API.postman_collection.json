@@ -1,0 +1,276 @@
+{
+  "info": {
+    "name": "WhatsApp Organizations API",
+    "description": "Multi-organization WhatsApp service (Express + MongoDB).\n\n**Before first request**\n1. Import this collection **and** `WhatsApp-Organizations-API.postman_environment.json`, then select environment **Local (WhatsApp API)**.\n2. Or: Collection → **Variables** → set `adminKey` to the **exact** same string as `ADMIN_API_KEY` in your server `.env` (default in `.env.example` is `change-me-long-random-secret`).\n3. If you see `Invalid or missing admin key`, `adminKey` in Postman does not match `ADMIN_API_KEY` on the server — fix one or the other so they are identical.\n\n**Variables**\n- `baseUrl` — e.g. `http://localhost:3000`\n- `adminKey` — must equal server `ADMIN_API_KEY` (organization provisioning)\n- `organizationId` — from **POST Create organization** response `id`\n- `apiKey` — from create response (for `/api/*`)\n- `webhookApiKey` — same as `apiKey`\n- `leadId` — for PATCH lead\n\n**Auth**\n- Org routes use **Bearer Token** `{{adminKey}}` (or header `X-Admin-Key: {{adminKey}}`).\n- Other API routes use header **x-api-key:** `{{apiKey}}`.\n\n**Meta webhook URL:** `{{baseUrl}}/webhook/{{webhookApiKey}}`",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000" },
+    { "key": "adminKey", "value": "change-me-long-random-secret" },
+    { "key": "organizationId", "value": "paste-organization-objectid-here" },
+    { "key": "apiKey", "value": "your-organization-api-key" },
+    { "key": "webhookApiKey", "value": "your-organization-api-key" },
+    { "key": "webhookVerifyToken", "value": "your-webhook-verify-token" },
+    { "key": "phoneNumberId", "value": "your-phone-number-id" },
+    { "key": "hubChallenge", "value": "test_challenge_string" },
+    { "key": "whatsappAppSecret", "value": "" },
+    { "key": "leadId", "value": "paste-lead-objectid-here" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "GET Health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/health",
+            "description": "Liveness check. No authentication."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Organizations (X-Admin-Key)",
+      "item": [
+        {
+          "name": "POST Create organization",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{adminKey}}", "type": "string" }]
+            },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"businessName\": \"Acme Corp\",\n  \"businessType\": \"retail\"\n}"
+            },
+            "url": "{{baseUrl}}/api/organizations",
+            "description": "Creates an organization and returns `apiKey`. Copy `id` → variable `organizationId`, `apiKey` → `apiKey` and `webhookApiKey`.\n\nUses Bearer token = `adminKey` (same value as `ADMIN_API_KEY` in server `.env`)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let data = {};",
+                  "try { data = pm.response.json(); } catch (e) {}",
+                  "if (data.id) pm.environment.set('organizationId', data.id);",
+                  "if (data.apiKey) {",
+                  "  pm.environment.set('apiKey', data.apiKey);",
+                  "  pm.environment.set('webhookApiKey', data.apiKey);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "PATCH Set WhatsApp credentials",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{adminKey}}", "type": "string" }]
+            },
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"businessAccountId\": \"YOUR_WABA_ID\",\n  \"phoneNumberId\": \"YOUR_PHONE_NUMBER_ID\",\n  \"accessToken\": \"YOUR_LONG_LIVED_TOKEN\",\n  \"verifyToken\": \"YOUR_WEBHOOK_VERIFY_TOKEN\",\n  \"number\": \"+15551234567\"\n}"
+            },
+            "url": "{{baseUrl}}/api/organizations/{{organizationId}}/whatsapp",
+            "description": "Sets Meta WhatsApp credentials. Required fields: `businessAccountId`, `phoneNumberId`, `accessToken`, `verifyToken`. Set variable `organizationId` to the `id` from create response. Bearer token = `adminKey` (must match server `ADMIN_API_KEY`)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let body = {};",
+                  "try { body = JSON.parse(pm.request.body.raw || '{}'); } catch (e) {}",
+                  "if (body.verifyToken) pm.environment.set('webhookVerifyToken', body.verifyToken);",
+                  "if (body.phoneNumberId) pm.environment.set('phoneNumberId', body.phoneNumberId);"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "API (x-api-key)",
+      "item": [
+        {
+          "name": "Messages",
+          "item": [
+            {
+              "name": "POST Send single message",
+              "request": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type", "value": "application/json" },
+                  { "key": "x-api-key", "value": "{{apiKey}}" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"to\": \"15551234567\",\n  \"text\": \"Hello from Postman\"\n}"
+                },
+                "url": "{{baseUrl}}/api/messages/send",
+                "description": "Simple send API. Preferred body: `{ to, text }`. Backward compatible aliases: `toPhone`, `message`.\n\n`to` is normalized to digits.\n\n**Success:** `ok=true` with `id`, `toPhone`, `status`, `metaMessageId`.\n**Failure:** `502` with Meta reason + saved `messageLog`."
+              },
+              "response": []
+            },
+            {
+              "name": "POST Bulk send",
+              "request": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type", "value": "application/json" },
+                  { "key": "x-api-key", "value": "{{apiKey}}" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"messages\": [\n    { \"to\": \"15551234567\", \"text\": \"Bulk 1\" },\n    { \"toPhone\": \"15559876543\", \"message\": \"Bulk 2 (alternate field names)\" }\n  ]\n}"
+                },
+                "url": "{{baseUrl}}/api/messages/bulk-send",
+                "description": "Sends multiple messages; all rows share the same `jobId` in DB.\n\nEach item accepts `to` or `toPhone`, and `message` or `text`.\n\n**Response:** `jobId`, `results[]` with per-row `ok`, `id`, `status`, `metaMessageId`."
+              },
+              "response": []
+            },
+            {
+              "name": "GET Message history",
+              "request": {
+                "method": "GET",
+                "header": [{ "key": "x-api-key", "value": "{{apiKey}}" }],
+                "url": "{{baseUrl}}/api/messages?phone=15551234567",
+                "description": "Returns outbound messages for this organization (newest first, max 200).\n\nQuery `phone` (optional): digits-only filter for `toPhone`. Remove query to list last 200."
+              },
+              "response": []
+            },
+            {
+              "name": "GET Message history (all)",
+              "request": {
+                "method": "GET",
+                "header": [{ "key": "x-api-key", "value": "{{apiKey}}" }],
+                "url": "{{baseUrl}}/api/messages",
+                "description": "Same as **GET Message history** without `phone` filter."
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "Leads",
+          "item": [
+            {
+              "name": "GET All leads",
+              "request": {
+                "method": "GET",
+                "header": [{ "key": "x-api-key", "value": "{{apiKey}}" }],
+                "url": "{{baseUrl}}/api/leads",
+                "description": "Lists leads for the organization, newest `lastMessageAt` first."
+              },
+              "response": []
+            },
+            {
+              "name": "GET Leads with filters",
+              "request": {
+                "method": "GET",
+                "header": [{ "key": "x-api-key", "value": "{{apiKey}}" }],
+                "url": "{{baseUrl}}/api/leads?status=new&phone=1555",
+                "description": "Optional query `status`: new | contacted | converted | lost.\nOptional `phone`: digits-only (exact stored value after normalization)."
+              },
+              "response": []
+            },
+            {
+              "name": "PATCH Update lead status",
+              "request": {
+                "method": "PATCH",
+                "header": [
+                  { "key": "Content-Type", "value": "application/json" },
+                  { "key": "x-api-key", "value": "{{apiKey}}" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"contacted\"\n}"
+                },
+                "url": "{{baseUrl}}/api/leads/{{leadId}}",
+                "description": "Updates lead `status` for this organization only.\n\n**Allowed values:** `new`, `contacted`, `converted`, `lost`.\n\nSet collection variable `leadId` to a valid Lead `_id`."
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "Stats",
+          "item": [
+            {
+              "name": "GET Stats",
+              "request": {
+                "method": "GET",
+                "header": [{ "key": "x-api-key", "value": "{{apiKey}}" }],
+                "url": "{{baseUrl}}/api/stats",
+                "description": "Aggregates outbound message counts by status (`sent`, `delivered`, `read`, `failed`) and `totalLeads`."
+              },
+              "response": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Webhook (Meta)",
+      "item": [
+        {
+          "name": "GET Webhook verification (hub.challenge)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/webhook/{{webhookApiKey}}?hub.mode=subscribe&hub.verify_token={{webhookVerifyToken}}&hub.challenge={{hubChallenge}}",
+            "description": "Meta calls this when you add the webhook URL.\n\nSet env values:\n- `webhookApiKey` = organization apiKey\n- `webhookVerifyToken` = organization whatsapp verifyToken\n- `hubChallenge` = any string\n\n**Success:** response body exactly equals `hubChallenge`.\n\n**Failure:** 403."
+          },
+          "response": []
+        },
+        {
+          "name": "POST Webhook (sample inbound + status)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const appSecret = (pm.environment.get('whatsappAppSecret') || '').trim();",
+                  "const raw = pm.request.body && pm.request.body.raw ? pm.request.body.raw : '{}';",
+                  "if (!appSecret) {",
+                  "  pm.request.headers.remove('X-Hub-Signature-256');",
+                  "} else {",
+                  "  const digest = CryptoJS.HmacSHA256(raw, appSecret).toString(CryptoJS.enc.Hex);",
+                  "  pm.request.headers.upsert({ key: 'X-Hub-Signature-256', value: `sha256=${digest}` });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"object\": \"whatsapp_business_account\",\n  \"entry\": [\n    {\n      \"id\": \"WABA_ID\",\n      \"changes\": [\n        {\n          \"field\": \"messages\",\n          \"value\": {\n            \"messaging_product\": \"whatsapp\",\n            \"metadata\": {\n              \"display_phone_number\": \"15550000000\",\n              \"phone_number_id\": \"{{phoneNumberId}}\"\n            },\n            \"contacts\": [\n              {\n                \"profile\": { \"name\": \"Test User\" },\n                \"wa_id\": \"15551234567\"\n              }\n            ],\n            \"messages\": [\n              {\n                \"from\": \"15551234567\",\n                \"id\": \"wamid.inbound-example\",\n                \"timestamp\": \"1234567890\",\n                \"type\": \"text\",\n                \"text\": { \"body\": \"Hello\" }\n              }\n            ],\n            \"statuses\": [\n              {\n                \"id\": \"wamid.outbound-example\",\n                \"status\": \"delivered\",\n                \"timestamp\": \"1234567890\",\n                \"recipient_id\": \"15551234567\"\n              }\n            ]\n          }\n        }\n      ]\n    }\n  ]\n}"
+            },
+            "url": "{{baseUrl}}/webhook/{{webhookApiKey}}",
+            "description": "Simulates Meta’s webhook payload.\n\n- Uses `{{phoneNumberId}}`; it must match organization `whatsapp.phoneNumberId`.\n- Inbound `messages` upserts Leads.\n- `statuses` updates outbound `Message` by `metaMessageId`.\n\nUse a real `metaMessageId` from a prior send to test delivery updates.\n\nIf server env has `WHATSAPP_APP_SECRET`, this request must include valid `X-Hub-Signature-256` like Meta."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
