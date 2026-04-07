@@ -1,0 +1,38 @@
+name: Deploy Instabus Whatsapp
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Copy files to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST_PROD }}
+          username: ${{ secrets.SERVER_USER_PROD }}
+          key: ${{ secrets.SERVER_SSH_KEY_PROD }}
+          source: "."
+          target: "~/whatsappIntigration"
+
+      - name: SSH into server and deploy
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ secrets.SERVER_HOST_PROD }}
+          username: ${{ secrets.SERVER_USER_PROD }}
+          key: ${{ secrets.SERVER_SSH_KEY_PROD }}
+          script: |
+            cd ~/whatsappIntigration
+
+            docker stop instabus-wa || true
+            docker rm instabus-wa || true
+
+            docker build --no-cache -t instabus-wa .
+            docker run -d -p 3003:4173 --name instabus-wa instabus-wa
