@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const Organization = require('../models/Organization');
 const Message = require('../models/Message');
 const Lead = require('../models/Lead');
+const webhookLogBuffer = require('../services/webhookLogBuffer');
 
 const router = express.Router();
 
@@ -19,6 +20,45 @@ function normalizePhone(value) {
 
 async function loadOrganizationByApiKey(apiKey) {
   return Organization.findOne({ apiKey, isActive: true });
+}
+
+function rawRequestPayload(req) {
+  if (req.method === 'POST') {
+    if (Buffer.isBuffer(req.rawBody) && req.rawBody.length) {
+      return req.rawBody.toString('utf8');
+    }
+    return JSON.stringify(req.body || {});
+  }
+  const q = req.query || {};
+  return `?${new URLSearchParams(q).toString()}`;
+}
+
+/** Multi-tenant context when an org is resolved from the apiKey path segment. */
+function organizationSnapshot(org) {
+  if (!org || !org._id) {
+    return { organizationId: null, businessName: null, phoneNumberId: null };
+  }
+  return {
+    organizationId: String(org._id),
+    businessName: org.businessName ?? null,
+    phoneNumberId: org.whatsapp?.phoneNumberId ?? null,
+  };
+}
+
+function recordWebhook(req, extra) {
+  const apiKey = req.params.apiKey != null ? String(req.params.apiKey) : null;
+  webhookLogBuffer.push({
+    receivedAt: new Date().toISOString(),
+    method: req.method,
+    path: req.originalUrl || req.url,
+    apiKey,
+    headers: {
+      'content-type': req.header('content-type'),
+      'x-hub-signature-256': req.header('x-hub-signature-256'),
+    },
+    raw: rawRequestPayload(req),
+    ...extra,
+  });
 }
 
 function isMetaSignatureValid(req) {
@@ -38,14 +78,27 @@ function isMetaSignatureValid(req) {
 }
 
 router.get('/:apiKey', async (req, res) => {
+  let organization = null;
   try {
-    const organization = await loadOrganizationByApiKey(req.params.apiKey);
+    organization = await loadOrganizationByApiKey(req.params.apiKey);
     if (!organization) {
+      recordWebhook(req, {
+        kind: 'webhook_get',
+        outcome: 'unknown_org',
+        httpStatus: 403,
+        ...organizationSnapshot(null),
+      });
       return res.sendStatus(403);
     }
 
     const verifyToken = String(organization.whatsapp?.verifyToken || '').trim();
     if (!verifyToken) {
+      recordWebhook(req, {
+        kind: 'webhook_get',
+        outcome: 'missing_verify_token',
+        httpStatus: 403,
+        ...organizationSnapshot(organization),
+      });
       return res.sendStatus(403);
     }
 
@@ -54,24 +107,53 @@ router.get('/:apiKey', async (req, res) => {
     const challenge = req.query['hub.challenge'];
 
     if (mode === 'subscribe' && token === verifyToken && challenge !== undefined) {
+      recordWebhook(req, {
+        kind: 'webhook_get',
+        outcome: 'verified',
+        httpStatus: 200,
+        hubChallengeLength: String(challenge).length,
+        ...organizationSnapshot(organization),
+      });
       return res.status(200).type('text/plain').send(String(challenge));
     }
 
+    recordWebhook(req, {
+      kind: 'webhook_get',
+      outcome: 'verify_failed',
+      httpStatus: 403,
+      ...organizationSnapshot(organization),
+    });
     return res.sendStatus(403);
   } catch (err) {
     console.error('Webhook GET verification error:', err);
+    recordWebhook(req, {
+      kind: 'webhook_get',
+      outcome: 'error',
+      httpStatus: 500,
+      error: String(err.message || err),
+      ...organizationSnapshot(organization),
+    });
     return res.sendStatus(500);
   }
 });
 
 router.post('/:apiKey', async (req, res) => {
-  const organization = await loadOrganizationByApiKey(req.params.apiKey);
-  if (!organization) {
-    return res.sendStatus(403);
-  }
+  let outcome = 'unknown';
+  let httpStatus = 500;
+  let error;
+  let organization = null;
 
   try {
+    organization = await loadOrganizationByApiKey(req.params.apiKey);
+    if (!organization) {
+      outcome = 'unknown_org';
+      httpStatus = 403;
+      return res.sendStatus(403);
+    }
+
     if (!isMetaSignatureValid(req)) {
+      outcome = 'invalid_signature';
+      httpStatus = 403;
       return res.sendStatus(403);
     }
 
@@ -128,10 +210,23 @@ router.post('/:apiKey', async (req, res) => {
       }
     }
 
+    outcome = 'ok';
+    httpStatus = 200;
     return res.sendStatus(200);
   } catch (err) {
     console.error('Webhook POST error:', err);
+    outcome = 'error';
+    httpStatus = 500;
+    error = String(err.message || err);
     return res.sendStatus(500);
+  } finally {
+    recordWebhook(req, {
+      kind: 'webhook_post',
+      outcome,
+      httpStatus,
+      ...(error ? { error } : {}),
+      ...organizationSnapshot(organization),
+    });
   }
 });
 

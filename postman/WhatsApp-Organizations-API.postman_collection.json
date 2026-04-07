@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "WhatsApp Organizations API",
-    "description": "Multi-organization WhatsApp service (Express + MongoDB).\n\n**Before first request**\n1. Import this collection **and** `WhatsApp-Organizations-API.postman_environment.json`, then select environment **Local (WhatsApp API)**.\n2. Or: Collection → **Variables** → set `adminKey` to the **exact** same string as `ADMIN_API_KEY` in your server `.env` (default in `.env.example` is `change-me-long-random-secret`).\n3. If you see `Invalid or missing admin key`, `adminKey` in Postman does not match `ADMIN_API_KEY` on the server — fix one or the other so they are identical.\n\n**Variables**\n- `baseUrl` — e.g. `http://localhost:3000`\n- `adminKey` — must equal server `ADMIN_API_KEY` (organization provisioning)\n- `organizationId` — from **POST Create organization** response `id`\n- `apiKey` — from create response (for `/api/*`)\n- `webhookApiKey` — same as `apiKey`\n- `leadId` — for PATCH lead\n\n**Auth**\n- Org routes use **Bearer Token** `{{adminKey}}` (or header `X-Admin-Key: {{adminKey}}`).\n- Other API routes use header **x-api-key:** `{{apiKey}}`.\n\n**Meta webhook URL:** `{{baseUrl}}/webhook/{{webhookApiKey}}`",
+    "description": "Multi-organization WhatsApp service (Express + MongoDB).\n\n**Dynamic updates (no Postman re-import)**\n1. **REST Client / Cursor:** open `postman/WhatsApp-Organizations-API.http` in the editor — requests always match the file on disk; edit `@variables` at the top.\n2. **CLI:** `npm install` then `npm run postman:run` — Newman reads the JSON files from disk every time.\n3. **Postman app:** still requires re-import when the JSON changes (Postman limitation).\n\n**Updating the Postman collection file**\nIf you use the Postman GUI: **Import** → replace collection when `WhatsApp-Organizations-API.postman_collection.json` changes; re-import `WhatsApp-Organizations-API.postman_environment.json` for env vars.\n\n**Before first request**\n1. Import this collection **and** `WhatsApp-Organizations-API.postman_environment.json`, then select environment **Local (WhatsApp API)**.\n2. Or: Collection → **Variables** → set `adminKey` to the **exact** same string as `ADMIN_API_KEY` in your server `.env` (default in `.env.example` is `change-me-long-random-secret`).\n3. If you see `Invalid or missing admin key`, `adminKey` in Postman does not match `ADMIN_API_KEY` on the server — fix one or the other so they are identical.\n\n**Variables**\n- `baseUrl` — local dev, e.g. `http://localhost:3000`\n- `deployedBaseUrl` — **public** https origin where Meta sends webhooks (must match Meta Callback URL host). Use this for **GET Webhook logs (deployed)** so you read logs from the same server Meta hits.\n- `adminKey` — must equal server `ADMIN_API_KEY` (organization provisioning + webhook debug logs)\n- `organizationId` — from **POST Create organization** response `id`\n- `apiKey` — from create response (for `/api/*`)\n- `webhookApiKey` — same as `apiKey`\n- `leadId` — for PATCH lead\n- `webhookLogLimit` — max entries for **GET Webhook logs** (default `100`)\n\n**Auth**\n- Org routes and **Webhook debug logs** use **Bearer Token** `{{adminKey}}` (or header `X-Admin-Key: {{adminKey}}`).\n- Other API routes use header **x-api-key:** `{{apiKey}}`.\n\n**Meta webhook URL:** `{{baseUrl}}/webhook/{{webhookApiKey}}`\n\n**Inbound debugging:** After messages hit your server, open **GET Webhook logs (raw)** — each entry includes `raw` (full Meta JSON string). In-memory only; restart clears. Optional env `WEBHOOK_LOG_MAX` caps buffer size.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -14,7 +14,9 @@
     { "key": "phoneNumberId", "value": "your-phone-number-id" },
     { "key": "hubChallenge", "value": "test_challenge_string" },
     { "key": "whatsappAppSecret", "value": "" },
-    { "key": "leadId", "value": "paste-lead-objectid-here" }
+    { "key": "leadId", "value": "paste-lead-objectid-here" },
+    { "key": "webhookLogLimit", "value": "100" },
+    { "key": "deployedBaseUrl", "value": "https://whatsapp.instabus.co.in" }
   ],
   "item": [
     {
@@ -100,6 +102,53 @@
               }
             }
           ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Webhook debug logs (X-Admin-Key)",
+      "item": [
+        {
+          "name": "GET Webhook logs (raw)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{adminKey}}", "type": "string" }]
+            },
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/webhook-logs?all=true",
+            "description": "Reads logs from **this** `baseUrl` process only (e.g. localhost).\n\nReturns Meta webhook traffic from **in-memory** buffer (newest first).\n\n**Multi-tenant:** Default returns **all organizations** in this process. Each log includes `organizationId`, `businessName`, `phoneNumberId` (from DB when the path apiKey matched an org), plus `apiKey` from the URL path.\n\n**Response:** `count`, `max`, `returned`, `limitRequested`, `filter` (null or `{ organizationId, apiKey }`), `logs[]`, `diagnostic`. Each log: `id`, `receivedAt`, `method`, `path`, `organizationId`, `businessName`, `phoneNumberId`, `apiKey`, `headers`, `raw`, `kind`, `outcome`, `httpStatus`.\n\n**Query:** `all=true` — return up to `WEBHOOK_LOG_MAX` entries (full buffer). `limit` — cap (1–2000) when `all` is not set. `organizationId` — filter to one org. `apiKey` — filter to one org’s `wk_…` key.\n\n**Outcomes:** `ok` | `unknown_org` | `invalid_signature` | `missing_api_key_in_url` | `error`.\n\n**Auth:** Bearer = `adminKey`.\n\n**Note:** Per-process buffer; restart clears. Set `WEBHOOK_LOG_MAX` in `.env` for capacity.\n\n**If Meta uses a public domain:** use **GET Webhook logs (deployed / Meta host)** instead."
+          },
+          "response": []
+        },
+        {
+          "name": "GET Webhook logs (deployed / Meta host)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{adminKey}}", "type": "string" }]
+            },
+            "method": "GET",
+            "header": [],
+            "url": "{{deployedBaseUrl}}/api/webhook-logs?all=true&limit={{webhookLogLimit}}",
+            "description": "**Use this when Meta Callback URL is on a public host** (e.g. `https://whatsapp.instabus.co.in/webhook/wk_...`).\n\nMeta POSTs there; in-memory logs live on **that** Node process. You must call `/api/webhook-logs` on the **same** `https://` origin — not `localhost`.\n\nSet environment variable `deployedBaseUrl` to your public origin (no trailing slash). Set `adminKey` to the **production** `ADMIN_API_KEY` (same as on the deployed server).\n\nSame response shape as **GET Webhook logs (raw)**."
+          },
+          "response": []
+        },
+        {
+          "name": "DELETE Clear webhook logs",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{adminKey}}", "type": "string" }]
+            },
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/api/webhook-logs",
+            "description": "Clears the in-memory webhook debug buffer.\n\n**Auth:** Bearer = `adminKey`."
+          },
           "response": []
         }
       ]

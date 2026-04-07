@@ -1,0 +1,154 @@
+# WhatsApp Organizations API — lives in git; no Postman re-import.
+# Cursor / VS Code: install "REST Client" (humao.rest-client), open this file, click "Send Request" above each block.
+# Edit @variables below; save file = your requests update immediately.
+
+@baseUrl = http://localhost:3000
+@deployedBaseUrl = https://whatsapp.instabus.co.in
+@adminKey = change-me-long-random-secret
+@organizationId = paste-organization-objectid-here
+@apiKey = your-organization-api-key
+@webhookApiKey = your-organization-api-key
+@webhookVerifyToken = your-webhook-verify-token
+@phoneNumberId = your-phone-number-id
+@hubChallenge = test_challenge_string
+@leadId = paste-lead-objectid-here
+@webhookLogLimit = 100
+
+### Health
+GET {{baseUrl}}/health
+
+### POST Create organization (admin)
+POST {{baseUrl}}/api/organizations
+Authorization: Bearer {{adminKey}}
+Content-Type: application/json
+
+{
+  "businessName": "Acme Corp",
+  "businessType": "retail"
+}
+
+### PATCH Set WhatsApp credentials (admin)
+PATCH {{baseUrl}}/api/organizations/{{organizationId}}/whatsapp
+Authorization: Bearer {{adminKey}}
+Content-Type: application/json
+
+{
+  "businessAccountId": "YOUR_WABA_ID",
+  "phoneNumberId": "{{phoneNumberId}}",
+  "accessToken": "YOUR_LONG_LIVED_TOKEN",
+  "verifyToken": "{{webhookVerifyToken}}",
+  "number": "+15551234567"
+}
+
+### GET Webhook logs — local process only (admin)
+GET {{baseUrl}}/api/webhook-logs?all=true
+Authorization: Bearer {{adminKey}}
+
+### GET Webhook logs — same host as Meta / production (admin)
+GET {{deployedBaseUrl}}/api/webhook-logs?all=true&limit={{webhookLogLimit}}
+Authorization: Bearer {{adminKey}}
+
+### DELETE Clear webhook logs (admin)
+DELETE {{baseUrl}}/api/webhook-logs
+Authorization: Bearer {{adminKey}}
+
+### POST Send single message
+POST {{baseUrl}}/api/messages/send
+Content-Type: application/json
+x-api-key: {{apiKey}}
+
+{
+  "to": "15551234567",
+  "text": "Hello from REST Client"
+}
+
+### POST Bulk send
+POST {{baseUrl}}/api/messages/bulk-send
+Content-Type: application/json
+x-api-key: {{apiKey}}
+
+{
+  "messages": [
+    { "to": "15551234567", "text": "Bulk 1" }
+  ]
+}
+
+### GET Message history
+GET {{baseUrl}}/api/messages?phone=15551234567
+x-api-key: {{apiKey}}
+
+### GET Message history (all)
+GET {{baseUrl}}/api/messages
+x-api-key: {{apiKey}}
+
+### GET All leads
+GET {{baseUrl}}/api/leads
+x-api-key: {{apiKey}}
+
+### GET Leads with filters
+GET {{baseUrl}}/api/leads?status=new&phone=1555
+x-api-key: {{apiKey}}
+
+### PATCH Update lead status
+PATCH {{baseUrl}}/api/leads/{{leadId}}
+Content-Type: application/json
+x-api-key: {{apiKey}}
+
+{
+  "status": "contacted"
+}
+
+### GET Stats
+GET {{baseUrl}}/api/stats
+x-api-key: {{apiKey}}
+
+### GET Webhook verification (hub.challenge)
+GET {{baseUrl}}/webhook/{{webhookApiKey}}?hub.mode=subscribe&hub.verify_token={{webhookVerifyToken}}&hub.challenge={{hubChallenge}}
+
+### POST Webhook sample (no signature — ok if server WHATSAPP_APP_SECRET is empty)
+POST {{baseUrl}}/webhook/{{webhookApiKey}}
+Content-Type: application/json
+
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "WABA_ID",
+      "changes": [
+        {
+          "field": "messages",
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "15550000000",
+              "phone_number_id": "{{phoneNumberId}}"
+            },
+            "contacts": [
+              {
+                "profile": { "name": "Test User" },
+                "wa_id": "15551234567"
+              }
+            ],
+            "messages": [
+              {
+                "from": "15551234567",
+                "id": "wamid.inbound-example",
+                "timestamp": "1234567890",
+                "type": "text",
+                "text": { "body": "Hello" }
+              }
+            ],
+            "statuses": [
+              {
+                "id": "wamid.outbound-example",
+                "status": "delivered",
+                "timestamp": "1234567890",
+                "recipient_id": "15551234567"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
