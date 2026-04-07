@@ -35,4 +35,4 @@ jobs:
             docker rm instabus-wa || true
 
             docker build --no-cache -t instabus-wa .
-            docker run -d -p 3003:3003 --name instabus-wa instabus-wa
+            docker run -d -p 3003:10000 --name instabus-wa instabus-wa
