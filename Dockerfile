@@ -2,12 +2,12 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-COPY . .
+COPY package*.json ./
 
 RUN npm install --force
 
-RUN npm run build
+COPY . .
 
-EXPOSE 3002
+EXPOSE 3003
 
-CMD ["npm", "run", "preview"]
+CMD ["node", "server.js"]
