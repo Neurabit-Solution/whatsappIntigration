@@ -12,6 +12,7 @@ const organizationsRoutes = require('./routes/organizations');
 const messagesRoutes = require('./routes/messages');
 const leadsRoutes = require('./routes/leads');
 const statsRoutes = require('./routes/stats');
+const templatesRoutes = require('./routes/templates');
 const webhookLogsRoutes = require('./routes/webhookLogs');
 const webhookLogBuffer = require('./services/webhookLogBuffer');
 
@@ -24,6 +25,9 @@ if (!MONGODB_URI) {
 }
 
 const app = express();
+
+// Behind nginx / ALB, trust X-Forwarded-* so req.protocol and webhook-logs diagnostic match https://
+app.set('trust proxy', 1);
 
 app.use(helmet());
 app.use(cors());
@@ -80,6 +84,7 @@ app.use('/api/webhook-logs', adminKeyMiddleware, webhookLogsRoutes);
 app.use('/api/messages', apiKeyMiddleware, messagesRoutes);
 app.use('/api/leads', apiKeyMiddleware, leadsRoutes);
 app.use('/api/stats', apiKeyMiddleware, statsRoutes);
+app.use('/api/templates', apiKeyMiddleware, templatesRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });

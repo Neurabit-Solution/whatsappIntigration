@@ -13,6 +13,9 @@
 @hubChallenge = test_challenge_string
 @leadId = paste-lead-objectid-here
 @webhookLogLimit = 100
+@templateTestPhone = 919876543210
+@preTrevelTemplateName = pre_trevel
+@preTrevelLanguageCode = en
 
 ### Health
 GET {{baseUrl}}/health
@@ -80,6 +83,39 @@ x-api-key: {{apiKey}}
 ### GET Message history (all)
 GET {{baseUrl}}/api/messages
 x-api-key: {{apiKey}}
+
+### GET List message templates (Meta WABA)
+# Uses org whatsapp.businessAccountId + accessToken. Optional: ?limit=50&after=&name=&status=APPROVED
+GET {{baseUrl}}/api/templates
+x-api-key: {{apiKey}}
+
+### POST Send template — pre_trevel (utility)
+# Edit @templateTestPhone (country code + number, digits only). Set name/language from GET /api/templates if needed.
+# debug: true echoes metaPayload (exact JSON sent to Meta) in the response.
+POST {{baseUrl}}/api/templates/send
+Content-Type: application/json
+x-api-key: {{apiKey}}
+
+{
+  "to": "{{templateTestPhone}}",
+  "templateName": "{{preTrevelTemplateName}}",
+  "languageCode": "{{preTrevelLanguageCode}}",
+  "headerParameters": ["ABC"],
+  "bodyParameters": ["Radha krishna", "10:00am", "Delhi"],
+  "debug": true
+}
+
+### POST Send template — hello_world (no variables)
+POST {{baseUrl}}/api/templates/send
+Content-Type: application/json
+x-api-key: {{apiKey}}
+
+{
+  "to": "{{templateTestPhone}}",
+  "templateName": "hello_world",
+  "languageCode": "en_US",
+  "debug": true
+}
 
 ### GET All leads
 GET {{baseUrl}}/api/leads

@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "WhatsApp Organizations API",
-    "description": "Multi-organization WhatsApp service (Express + MongoDB).\n\n**Dynamic updates (no Postman re-import)**\n1. **REST Client / Cursor:** open `postman/WhatsApp-Organizations-API.http` in the editor — requests always match the file on disk; edit `@variables` at the top.\n2. **CLI:** `npm install` then `npm run postman:run` — Newman reads the JSON files from disk every time.\n3. **Postman app:** still requires re-import when the JSON changes (Postman limitation).\n\n**Updating the Postman collection file**\nIf you use the Postman GUI: **Import** → replace collection when `WhatsApp-Organizations-API.postman_collection.json` changes; re-import `WhatsApp-Organizations-API.postman_environment.json` for env vars.\n\n**Before first request**\n1. Import this collection **and** `WhatsApp-Organizations-API.postman_environment.json`, then select environment **Local (WhatsApp API)**.\n2. Or: Collection → **Variables** → set `adminKey` to the **exact** same string as `ADMIN_API_KEY` in your server `.env` (default in `.env.example` is `change-me-long-random-secret`).\n3. If you see `Invalid or missing admin key`, `adminKey` in Postman does not match `ADMIN_API_KEY` on the server — fix one or the other so they are identical.\n\n**Variables**\n- `baseUrl` — local dev, e.g. `http://localhost:3000`\n- `deployedBaseUrl` — **public** https origin where Meta sends webhooks (must match Meta Callback URL host). Use this for **GET Webhook logs (deployed)** so you read logs from the same server Meta hits.\n- `adminKey` — must equal server `ADMIN_API_KEY` (organization provisioning + webhook debug logs)\n- `organizationId` — from **POST Create organization** response `id`\n- `apiKey` — from create response (for `/api/*`)\n- `webhookApiKey` — same as `apiKey`\n- `leadId` — for PATCH lead\n- `webhookLogLimit` — max entries for **GET Webhook logs** (default `100`)\n\n**Auth**\n- Org routes and **Webhook debug logs** use **Bearer Token** `{{adminKey}}` (or header `X-Admin-Key: {{adminKey}}`).\n- Other API routes use header **x-api-key:** `{{apiKey}}`.\n\n**Meta webhook URL:** `{{baseUrl}}/webhook/{{webhookApiKey}}`\n\n**Inbound debugging:** After messages hit your server, open **GET Webhook logs (raw)** — each entry includes `raw` (full Meta JSON string). In-memory only; restart clears. Optional env `WEBHOOK_LOG_MAX` caps buffer size.",
+    "description": "Multi-organization WhatsApp service (Express + MongoDB).\n\n**Dynamic updates (no Postman re-import)**\n1. **REST Client / Cursor:** open `postman/WhatsApp-Organizations-API.http` in the editor — requests always match the file on disk; edit `@variables` at the top.\n2. **CLI:** `npm install` then `npm run postman:run` — Newman reads the JSON files from disk every time.\n3. **Postman app:** still requires re-import when the JSON changes (Postman limitation).\n\n**Updating the Postman collection file**\nIf you use the Postman GUI: **Import** → replace collection when `WhatsApp-Organizations-API.postman_collection.json` changes; re-import `WhatsApp-Organizations-API.postman_environment.json` for env vars.\n\n**Before first request**\n1. Import this collection **and** `WhatsApp-Organizations-API.postman_environment.json`, then select environment **Local (WhatsApp API)**.\n2. Or: Collection → **Variables** → set `adminKey` to the **exact** same string as `ADMIN_API_KEY` in your server `.env` (default in `.env.example` is `change-me-long-random-secret`).\n3. If you see `Invalid or missing admin key`, `adminKey` in Postman does not match `ADMIN_API_KEY` on the server — fix one or the other so they are identical.\n\n**Variables**\n- `baseUrl` — local dev, e.g. `http://localhost:3000`\n- `deployedBaseUrl` — **public** https origin where Meta sends webhooks (must match Meta Callback URL host). Use this for **GET Webhook logs (deployed)** so you read logs from the same server Meta hits.\n- `adminKey` — must equal server `ADMIN_API_KEY` (organization provisioning + webhook debug logs)\n- `organizationId` — from **POST Create organization** response `id`\n- `apiKey` — from create response (for `/api/*`)\n- `webhookApiKey` — same as `apiKey`\n- `leadId` — for PATCH lead\n- `webhookLogLimit` — max entries for **GET Webhook logs** (default `100`)\n- `templateTestPhone` — digits-only WhatsApp recipient for **POST Send template — pre_trevel** (include country code, no `+`)\n- `preTrevelTemplateName` — usually `pre_trevel` (must match Meta template name exactly)\n- `preTrevelLanguageCode` — usually `en` (must match approved template language)\n\n**Auth**\n- Org routes and **Webhook debug logs** use **Bearer Token** `{{adminKey}}` (or header `X-Admin-Key: {{adminKey}}`).\n- Other API routes use header **x-api-key:** `{{apiKey}}`.\n\n**Meta webhook URL:** `{{baseUrl}}/webhook/{{webhookApiKey}}`\n\n**Templates:** `GET {{baseUrl}}/api/templates` lists templates (WABA). `POST {{baseUrl}}/api/templates/send` sends a template message via Meta `POST /{phone-number-id}/messages` (`type: template`) using `phoneNumberId` + `accessToken`.\n\n**Inbound debugging:** After messages hit your server, open **GET Webhook logs (raw)** — each entry includes `raw` (full Meta JSON string). In-memory only; restart clears. Optional env `WEBHOOK_LOG_MAX` caps buffer size.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -16,7 +16,10 @@
     { "key": "whatsappAppSecret", "value": "" },
     { "key": "leadId", "value": "paste-lead-objectid-here" },
     { "key": "webhookLogLimit", "value": "100" },
-    { "key": "deployedBaseUrl", "value": "https://whatsapp.instabus.co.in" }
+    { "key": "deployedBaseUrl", "value": "https://whatsapp.instabus.co.in" },
+    { "key": "templateTestPhone", "value": "919876543210" },
+    { "key": "preTrevelTemplateName", "value": "pre_trevel" },
+    { "key": "preTrevelLanguageCode", "value": "en" }
   ],
   "item": [
     {
@@ -210,6 +213,80 @@
                 "header": [{ "key": "x-api-key", "value": "{{apiKey}}" }],
                 "url": "{{baseUrl}}/api/messages",
                 "description": "Same as **GET Message history** without `phone` filter."
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "Templates",
+          "item": [
+            {
+              "name": "GET List message templates (Meta)",
+              "request": {
+                "method": "GET",
+                "header": [{ "key": "x-api-key", "value": "{{apiKey}}" }],
+                "url": "{{baseUrl}}/api/templates",
+                "description": "Returns WhatsApp message templates for this organization’s **WhatsApp Business Account** by calling Meta Graph API `GET /{whatsapp-business-account-id}/message_templates` with the org’s stored `businessAccountId` and `accessToken`.\n\n**Auth:** `x-api-key` = organization `apiKey`.\n\n**Prerequisites:** `PATCH /api/organizations/:id/whatsapp` must include `businessAccountId` (WABA id) and `accessToken` with `whatsapp_business_management` (and template read) permissions.\n\n**Response:** `data` — array of template objects (Meta shape); `paging` — cursor pagination when present.\n\n**Optional query (passed to Meta):** `limit` (1–1000), `after`, `before` (cursors), `name` (filter by template name), `status` (e.g. `APPROVED`, `PENDING`), `fields` (comma-separated field list).\n\n**Errors:** `503` if WABA/token not set; `4xx/5xx` from Meta with `metaError` detail; `502` for network/other failures.\n\nMeta docs: https://developers.facebook.com/docs/graph-api/reference/whats-app-business-account/message_templates"
+              },
+              "response": []
+            },
+            {
+              "name": "POST Send template — pre_trevel (utility)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test('Status is 201', function () { pm.response.to.have.status(201); });",
+                      "var j = {}; try { j = pm.response.json(); } catch (e) {}",
+                      "pm.test('Response has ok and metaMessageId', function () {",
+                      "  pm.expect(j.ok).to.eql(true);",
+                      "  pm.expect(j.metaMessageId).to.be.a('string');",
+                      "});",
+                      "pm.test('debug: metaPayload matches template send shape', function () {",
+                      "  if (!j.metaPayload) return;",
+                      "  pm.expect(j.metaPayload.type).to.eql('template');",
+                      "  pm.expect(j.metaPayload.template.name).to.eql(j.templateName);",
+                      "  var c = j.metaPayload.template.components || [];",
+                      "  pm.expect(c.length).to.be.at.least(2);",
+                      "  pm.expect(c[0].type).to.eql('header');",
+                      "  pm.expect(c[1].type).to.eql('body');",
+                      "});"
+                    ]
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type", "value": "application/json" },
+                  { "key": "x-api-key", "value": "{{apiKey}}" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"to\": \"{{templateTestPhone}}\",\n  \"templateName\": \"{{preTrevelTemplateName}}\",\n  \"languageCode\": \"{{preTrevelLanguageCode}}\",\n  \"headerParameters\": [\n    \"ABC\"\n  ],\n  \"bodyParameters\": [\n    \"Radha krishna\",\n    \"10:00am\",\n    \"Delhi\"\n  ],\n  \"debug\": true\n}"
+                },
+                "url": "{{baseUrl}}/api/templates/send",
+                "description": "**Ready-to-test `pre_trevel` utility template** (one HEADER text variable + three BODY text variables + quick-reply buttons — buttons need no payload).\n\n### Before you send\n1. **Create org** + **PATCH WhatsApp** with real `phoneNumberId`, `accessToken`, `businessAccountId`.\n2. Set **`apiKey`** (and optionally **`templateTestPhone`**) in the environment or collection variables.\n3. Confirm template name and language: run **GET List message templates** and find `pre_trevel` — use exact `name` and `language` (e.g. `en`). Update `preTrevelTemplateName` / `preTrevelLanguageCode` if different.\n4. Recipient must have **opted in**; for dev, add the number in Meta **To** list.\n\n### Body fields\n- `headerParameters`: one string → maps to the HEADER text variable\n- `bodyParameters`: three strings in order → passenger name, departure time, boarding point\n\n### Debug\nWith `\"debug\": true` (or `?debug=true`), the **201** response includes **`metaPayload`**: the exact JSON sent to Meta (no token). Remove `debug` in production if you prefer a smaller response.\n\n**Success:** `201` with `metaMessageId`. **Errors:** `502` + `metaError` (see `metaPayload` when `debug` is on).\n\nMeta: https://developers.facebook.com/docs/whatsapp/cloud-api/guides/send-messages#template-messages"
+              },
+              "response": []
+            },
+            {
+              "name": "POST Send template — hello_world (sample)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type", "value": "application/json" },
+                  { "key": "x-api-key", "value": "{{apiKey}}" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"to\": \"{{templateTestPhone}}\",\n  \"templateName\": \"hello_world\",\n  \"languageCode\": \"en_US\",\n  \"debug\": true\n}"
+                },
+                "url": "{{baseUrl}}/api/templates/send",
+                "description": "Meta sample template **without** variables. Uses `templateTestPhone`. Language must be `en_US` for the default `hello_world` template.\n\nSame endpoint as **pre_trevel**; omit `headerParameters` / `bodyParameters` when the template has no placeholders."
               },
               "response": []
             }
