@@ -89,6 +89,18 @@ x-api-key: {{apiKey}}
 GET {{baseUrl}}/api/templates
 x-api-key: {{apiKey}}
 
+### POST Send template — order_details_info (utility, 2 body vars)
+# {{1}} = electricShopName, {{2}} = passMessage (e.g. "XYZ Lights").
+POST {{baseUrl}}/api/templates/send/order-details-info
+Content-Type: application/json
+x-api-key: {{apiKey}}
+
+{
+  "phoneNumber": "{{templateTestPhone}}",
+  "electricShopName": "Bright Electric Co.",
+  "passMessage": "XYZ Lights"
+}
+
 ### POST Send template — pre_trevel (utility)
 # Edit @templateTestPhone (country code + number, digits only). Set name/language from GET /api/templates if needed.
 # debug: true echoes metaPayload (exact JSON sent to Meta) in the response.

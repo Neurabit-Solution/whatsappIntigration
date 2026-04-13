@@ -1,5 +1,11 @@
 const whatsappService = require('../services/whatsappService');
 
+/** Meta template name + language for approved utility template (body: Hi {{1}}… order {{2}}…). */
+const ORDER_DETAILS_INFO_TEMPLATE = {
+  name: 'order_details_info',
+  language: { code: 'en' },
+};
+
 function normalizePhone(value) {
   return String(value || '').replace(/\D/g, '');
 }
@@ -168,7 +174,109 @@ async function sendTemplate(req, res) {
   });
 }
 
+/**
+ * Sends the approved `order_details_info` template (positional body {{1}}, {{2}}).
+ * Payload: recipient phone + electricShopName (→ {{1}}) + passMessage (→ {{2}}).
+ */
+async function sendOrderDetailsInfoTemplate(req, res) {
+  const wantsDebug =
+    req.body?.debug === true ||
+    req.body?.debug === 'true' ||
+    req.query?.debug === 'true';
+
+  const toRaw =
+    req.body?.phoneNumber ??
+    req.body?.phone_number ??
+    req.body?.to ??
+    req.body?.toPhone;
+  const to = normalizePhone(toRaw);
+  if (!to || to.length < 8) {
+    return res.status(400).json({
+      error:
+        'phoneNumber (or phone_number, to, toPhone) is required with a valid phone number',
+    });
+  }
+
+  const shopRaw =
+    req.body?.electricShopName ?? req.body?.electric_shop_name ?? req.body?.shopName;
+  const electricShopName = String(shopRaw || '').trim();
+  if (!electricShopName) {
+    return res.status(400).json({
+      error: 'electricShopName (or electric_shop_name, shopName) is required',
+    });
+  }
+
+  const passRaw =
+    req.body?.passMessage ??
+    req.body?.pass_message ??
+    req.body?.secondBodyVariable ??
+    req.body?.second_body_variable;
+  const passMessage = String(passRaw || '').trim();
+  if (!passMessage) {
+    return res.status(400).json({
+      error: 'passMessage (or pass_message) is required — text for template body {{2}}',
+    });
+  }
+
+  if (!whatsappSendReady(req.organization)) {
+    return res.status(503).json({
+      error: 'WhatsApp is not configured for sending',
+      hint:
+        'Requires whatsapp.phoneNumberId and whatsapp.accessToken from PATCH /api/organizations/:id/whatsapp',
+    });
+  }
+
+  const components = whatsappService.buildTemplateComponentsFromParameters(undefined, [
+    electricShopName,
+    passMessage,
+  ]);
+  const template = {
+    ...ORDER_DETAILS_INFO_TEMPLATE,
+    components,
+  };
+
+  const metaPayload = whatsappService.buildTemplateMessagePayload(to, template);
+  const result = await whatsappService.sendTemplateMessage(req.organization, to, template);
+  const { doc } = result;
+
+  const debugBlock = wantsDebug
+    ? {
+        metaPayload,
+        graphApiVersion: whatsappService.GRAPH_API_VERSION,
+        graphEndpointHint: `POST https://graph.facebook.com/${whatsappService.GRAPH_API_VERSION}/{phone-number-id}/messages`,
+      }
+    : null;
+
+  if (result.status === 'failed') {
+    return res.status(502).json({
+      ok: false,
+      error: 'Failed to send template via Meta',
+      reason: result.failureReason,
+      metaError: result.metaError,
+      messageLog: {
+        id: doc._id,
+        status: doc.status,
+        sentAt: doc.sentAt,
+      },
+      ...(debugBlock || {}),
+    });
+  }
+
+  return res.status(201).json({
+    ok: true,
+    id: doc._id,
+    toPhone: doc.toPhone,
+    templateName: template.name,
+    languageCode: template.language.code,
+    status: doc.status,
+    metaMessageId: result.metaMessageId,
+    sentAt: doc.sentAt,
+    ...(debugBlock || {}),
+  });
+}
+
 module.exports = {
   listTemplates,
   sendTemplate,
+  sendOrderDetailsInfoTemplate,
 };
