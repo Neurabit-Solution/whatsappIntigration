@@ -10,13 +10,42 @@ const messageSchema = new mongoose.Schema(
     },
     toPhone: { type: String, required: true, index: true },
     message: { type: String, required: true },
+    direction: {
+      type: String,
+      enum: ['outbound', 'inbound'],
+      default: 'outbound',
+      index: true,
+    },
+    messageType: {
+      type: String,
+      enum: [
+        'text',
+        'template',
+        'button',
+        'interactive',
+        'image',
+        'audio',
+        'video',
+        'document',
+        'sticker',
+        'location',
+        'contacts',
+        'unsupported',
+      ],
+      default: 'text',
+    },
     status: {
       type: String,
-      enum: ['sent', 'delivered', 'read', 'failed'],
+      enum: ['sent', 'delivered', 'read', 'failed', 'received'],
       default: 'sent',
       index: true,
     },
     metaMessageId: { type: String, default: null, index: true },
+    inReplyToMetaMessageId: { type: String, default: null, index: true },
+    templateName: { type: String, default: null, index: true },
+    languageCode: { type: String, default: null },
+    customerName: { type: String, default: null },
+    rawWebhookMessage: { type: mongoose.Schema.Types.Mixed, default: null },
     sentAt: { type: Date, default: Date.now },
     jobId: { type: String, default: null, index: true },
   },
@@ -24,5 +53,7 @@ const messageSchema = new mongoose.Schema(
 );
 
 messageSchema.index({ organizationId: 1, toPhone: 1, sentAt: -1 });
+messageSchema.index({ organizationId: 1, direction: 1, toPhone: 1, sentAt: -1 });
+messageSchema.index({ organizationId: 1, direction: 1, metaMessageId: 1 });
 
 module.exports = mongoose.model('Message', messageSchema);

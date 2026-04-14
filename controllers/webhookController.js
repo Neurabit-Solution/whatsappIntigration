@@ -15,6 +15,76 @@ function normalizePhone(value) {
   return String(value || '').replace(/\D/g, '');
 }
 
+function parseWebhookTimestamp(timestampSeconds) {
+  const n = Number(timestampSeconds);
+  if (!Number.isFinite(n) || n <= 0) {
+    return new Date();
+  }
+  return new Date(Math.floor(n) * 1000);
+}
+
+function summarizeInboundMessage(msg) {
+  const type = String(msg?.type || '').trim().toLowerCase();
+  if (type === 'text') {
+    return String(msg?.text?.body || '').trim() || '[text]';
+  }
+  if (type === 'button') {
+    const txt = String(msg?.button?.text || '').trim();
+    const payload = String(msg?.button?.payload || '').trim();
+    return txt || payload || '[button]';
+  }
+  if (type === 'interactive') {
+    const buttonReply = msg?.interactive?.button_reply || {};
+    const listReply = msg?.interactive?.list_reply || {};
+    const btnTitle = String(buttonReply.title || '').trim();
+    const btnId = String(buttonReply.id || '').trim();
+    const listTitle = String(listReply.title || '').trim();
+    const listId = String(listReply.id || '').trim();
+    return btnTitle || btnId || listTitle || listId || '[interactive]';
+  }
+  if (type === 'image') {
+    return String(msg?.image?.caption || '').trim() || '[image]';
+  }
+  if (type === 'video') {
+    return String(msg?.video?.caption || '').trim() || '[video]';
+  }
+  if (type === 'document') {
+    return String(msg?.document?.caption || '').trim() || '[document]';
+  }
+  if (type === 'audio') {
+    return '[audio]';
+  }
+  if (type === 'sticker') {
+    return '[sticker]';
+  }
+  if (type === 'location') {
+    const name = String(msg?.location?.name || '').trim();
+    const address = String(msg?.location?.address || '').trim();
+    return name || address || '[location]';
+  }
+  if (type === 'contacts') {
+    return '[contacts]';
+  }
+  return '[unsupported]';
+}
+
+function normalizeInboundMessageType(msg) {
+  const type = String(msg?.type || '').trim().toLowerCase();
+  const allowed = new Set([
+    'text',
+    'button',
+    'interactive',
+    'image',
+    'audio',
+    'video',
+    'document',
+    'sticker',
+    'location',
+    'contacts',
+  ]);
+  return allowed.has(type) ? type : 'unsupported';
+}
+
 async function loadOrganizationByApiKey(apiKey) {
   return Organization.findOne({ apiKey, isActive: true });
 }
@@ -188,6 +258,34 @@ async function receiveWebhook(req, res) {
         for (const msg of messages) {
           const from = normalizePhone(msg.from);
           if (!from) continue;
+
+          const inboundMetaId = String(msg?.id || '').trim() || null;
+          const inboundDoc = {
+            organizationId: organization._id,
+            toPhone: from,
+            message: summarizeInboundMessage(msg),
+            direction: 'inbound',
+            messageType: normalizeInboundMessageType(msg),
+            status: 'received',
+            metaMessageId: inboundMetaId,
+            inReplyToMetaMessageId: String(msg?.context?.id || '').trim() || null,
+            customerName: String(value?.contacts?.[0]?.profile?.name || '').trim() || null,
+            rawWebhookMessage: msg,
+            sentAt: parseWebhookTimestamp(msg.timestamp),
+          };
+          if (inboundMetaId) {
+            await Message.findOneAndUpdate(
+              {
+                organizationId: organization._id,
+                direction: 'inbound',
+                metaMessageId: inboundMetaId,
+              },
+              { $set: inboundDoc },
+              { upsert: true }
+            );
+          } else {
+            await Message.create(inboundDoc);
+          }
 
           const now = new Date();
           await Lead.findOneAndUpdate(

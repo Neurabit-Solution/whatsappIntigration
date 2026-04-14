@@ -6,6 +6,34 @@ function normalizePhone(value) {
   return String(value || '').replace(/\D/g, '');
 }
 
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function unique(values) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function phoneVariants(value) {
+  const digits = normalizePhone(value);
+  if (!digits) return [];
+  const variants = [digits];
+  if (digits.length > 10) {
+    variants.push(digits.slice(-10));
+  }
+  if (digits.length === 10) {
+    variants.push(`91${digits}`);
+    variants.push(`0${digits}`);
+  }
+  return unique(variants);
+}
+
+function phoneCanonicalKey(value) {
+  const digits = normalizePhone(value);
+  if (!digits) return '';
+  return digits.length > 10 ? digits.slice(-10) : digits;
+}
+
 function whatsappConfigured(organization) {
   const w = organization.whatsapp;
   return !!(w && w.phoneNumberId && w.accessToken);
@@ -117,8 +145,151 @@ async function list(req, res) {
   return res.json({ messages: items });
 }
 
+async function listOrderDetailsRecipients(req, res) {
+  const templateNameRaw = String(req.query.templateName || 'order_details_info').trim();
+  const filter = {
+    organizationId: req.organization._id,
+    direction: 'outbound',
+  };
+  if (templateNameRaw && templateNameRaw.toLowerCase() !== 'all') {
+    filter.$or = [
+      { templateName: templateNameRaw },
+      { message: { $regex: `^\\[template\\]\\s*${escapeRegExp(templateNameRaw)}\\b`, $options: 'i' } },
+    ];
+  }
+
+  const groupedOutbound = await Message.aggregate([
+    { $match: filter },
+    { $sort: { sentAt: -1 } },
+    {
+      $group: {
+        _id: '$toPhone',
+        totalSent: { $sum: 1 },
+        latestStatus: { $first: '$status' },
+        lastSentAt: { $first: '$sentAt' },
+        templateName: { $first: '$templateName' },
+        lastMetaMessageId: { $first: '$metaMessageId' },
+      },
+    },
+    { $sort: { lastSentAt: -1 } },
+  ]);
+
+  const phones = groupedOutbound.map((item) => item._id).filter(Boolean);
+  const phoneVariantSet = new Set();
+  for (const phone of phones) {
+    for (const variant of phoneVariants(phone)) {
+      phoneVariantSet.add(variant);
+    }
+  }
+  const allPhoneVariants = [...phoneVariantSet];
+  let inboundByPhone = new Map();
+  if (allPhoneVariants.length > 0) {
+    const inboundGrouped = await Message.aggregate([
+      {
+        $match: {
+          organizationId: req.organization._id,
+          direction: 'inbound',
+          toPhone: { $in: allPhoneVariants },
+        },
+      },
+      { $sort: { sentAt: -1 } },
+      {
+        $group: {
+          _id: '$toPhone',
+          totalReplies: { $sum: 1 },
+          lastReplyAt: { $first: '$sentAt' },
+          lastReplyMessage: { $first: '$message' },
+          customerName: { $first: '$customerName' },
+        },
+      },
+    ]);
+    const normalized = new Map();
+    for (const item of inboundGrouped) {
+      const key = phoneCanonicalKey(item._id);
+      if (!key) continue;
+      const existing = normalized.get(key);
+      if (!existing) {
+        normalized.set(key, item);
+        continue;
+      }
+      normalized.set(key, {
+        ...existing,
+        totalReplies: (existing.totalReplies || 0) + (item.totalReplies || 0),
+        lastReplyAt:
+          new Date(item.lastReplyAt || 0) > new Date(existing.lastReplyAt || 0)
+            ? item.lastReplyAt
+            : existing.lastReplyAt,
+        lastReplyMessage:
+          new Date(item.lastReplyAt || 0) > new Date(existing.lastReplyAt || 0)
+            ? item.lastReplyMessage
+            : existing.lastReplyMessage,
+        customerName:
+          (new Date(item.lastReplyAt || 0) > new Date(existing.lastReplyAt || 0)
+            ? item.customerName
+            : existing.customerName) || null,
+      });
+    }
+    inboundByPhone = normalized;
+  }
+
+  const recipients = groupedOutbound.map((item) => {
+    const reply = inboundByPhone.get(phoneCanonicalKey(item._id));
+    return {
+      phoneNumber: item._id,
+      totalSent: item.totalSent,
+      latestStatus: item.latestStatus,
+      lastSentAt: item.lastSentAt,
+      templateName: item.templateName || null,
+      lastMetaMessageId: item.lastMetaMessageId || null,
+      totalReplies: reply?.totalReplies || 0,
+      lastReplyAt: reply?.lastReplyAt || null,
+      lastReplyMessage: reply?.lastReplyMessage || null,
+      customerName: reply?.customerName || null,
+    };
+  });
+
+  return res.json({
+    organizationId: String(req.organization._id),
+    templateName:
+      templateNameRaw && templateNameRaw.toLowerCase() !== 'all' ? templateNameRaw : 'all',
+    count: recipients.length,
+    recipients,
+  });
+}
+
+async function getConversationByPhone(req, res) {
+  const phoneNumber = normalizePhone(req.params.phone || req.query.phone);
+  if (!phoneNumber || phoneNumber.length < 8) {
+    return res.status(400).json({ error: 'Valid phone number is required in /:phone' });
+  }
+
+  const limitRequested = Number(req.query.limit);
+  const limit = Number.isFinite(limitRequested)
+    ? Math.min(1000, Math.max(1, Math.floor(limitRequested)))
+    : 500;
+
+  const phoneMatchVariants = phoneVariants(phoneNumber);
+  const messages = await Message.find({
+    organizationId: req.organization._id,
+    toPhone: { $in: phoneMatchVariants },
+  })
+    .sort({ sentAt: 1 })
+    .limit(limit)
+    .lean();
+
+  return res.json({
+    organizationId: String(req.organization._id),
+    phoneNumber,
+    count: messages.length,
+    limitRequested: limit,
+    messages,
+  });
+}
+
 module.exports = {
   send,
   bulkSend,
   list,
+  listOrderDetailsRecipients,
+  getConversationByPhone,
 };
