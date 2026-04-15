@@ -42,13 +42,33 @@ async function updateWhatsAppConfig(req, res) {
     });
   }
 
+  const normalizedBusinessAccountId = String(businessAccountId).trim();
+  const normalizedPhoneNumberId = String(phoneNumberId).trim();
+  const duplicateOrg = await Organization.findOne({
+    _id: { $ne: req.params.id },
+    isActive: true,
+    'whatsapp.businessAccountId': normalizedBusinessAccountId,
+    'whatsapp.phoneNumberId': normalizedPhoneNumberId,
+  })
+    .select({ _id: 1, businessName: 1 })
+    .lean();
+  if (duplicateOrg) {
+    return res.status(409).json({
+      error:
+        'This WhatsApp businessAccountId + phoneNumberId is already linked to another active organization',
+      existingOrganizationId: duplicateOrg._id,
+      existingBusinessName: duplicateOrg.businessName,
+      hint: 'Use the same organization API key for messaging/webhook, or disable the old org first.',
+    });
+  }
+
   const organization = await Organization.findByIdAndUpdate(
     req.params.id,
     {
       $set: {
         whatsapp: {
-          businessAccountId: String(businessAccountId).trim(),
-          phoneNumberId: String(phoneNumberId).trim(),
+          businessAccountId: normalizedBusinessAccountId,
+          phoneNumberId: normalizedPhoneNumberId,
           accessToken: String(accessToken).trim(),
           verifyToken: String(verifyToken).trim(),
           number: typeof number === 'string' ? number.trim() : '',

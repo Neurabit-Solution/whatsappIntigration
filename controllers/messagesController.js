@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const whatsappService = require('../services/whatsappService');
 const Message = require('../models/Message');
+const Organization = require('../models/Organization');
 
 function normalizePhone(value) {
   return String(value || '').replace(/\D/g, '');
@@ -37,6 +38,44 @@ function phoneCanonicalKey(value) {
 function whatsappConfigured(organization) {
   const w = organization.whatsapp;
   return !!(w && w.phoneNumberId && w.accessToken);
+}
+
+function linkedOrgMatch(organization) {
+  const phoneNumberId = String(organization?.whatsapp?.phoneNumberId || '').trim();
+  const businessAccountId = String(organization?.whatsapp?.businessAccountId || '').trim();
+  if (!phoneNumberId || !businessAccountId) return null;
+  return {
+    isActive: true,
+    'whatsapp.phoneNumberId': phoneNumberId,
+    'whatsapp.businessAccountId': businessAccountId,
+  };
+}
+
+function mapConversationMessage(messageDoc) {
+  const isOutbound = messageDoc?.direction === 'outbound';
+  const direction = isOutbound ? 'sent' : 'received';
+  const status = String(messageDoc?.status || (isOutbound ? 'sent' : 'received'));
+  const sentAt = messageDoc?.sentAt ? new Date(messageDoc.sentAt) : null;
+
+  return {
+    id: String(messageDoc?._id || ''),
+    text: String(messageDoc?.message || ''),
+    direction,
+    sender: isOutbound ? 'business' : 'customer',
+    status,
+    messageType: messageDoc?.messageType || 'text',
+    phoneNumber: messageDoc?.toPhone || null,
+    customerName: messageDoc?.customerName || null,
+    sentAt: sentAt || null,
+    timestamp: sentAt ? sentAt.toISOString() : null,
+    metaMessageId: messageDoc?.metaMessageId || null,
+    inReplyToMetaMessageId: messageDoc?.inReplyToMetaMessageId || null,
+    templateName: messageDoc?.templateName || null,
+    languageCode: messageDoc?.languageCode || null,
+    isFailed: status === 'failed',
+    isRead: status === 'read',
+    rawDirection: messageDoc?.direction || null,
+  };
 }
 
 function parseSingleMessageBody(body) {
@@ -269,18 +308,40 @@ async function getConversationByPhone(req, res) {
     : 500;
 
   const phoneMatchVariants = phoneVariants(phoneNumber);
-  const messages = await Message.find({
-    organizationId: req.organization._id,
+  const orgMatch = linkedOrgMatch(req.organization);
+  let orgIds = [req.organization._id];
+  if (orgMatch) {
+    const linkedOrgs = await Organization.find(orgMatch, { _id: 1 }).lean();
+    if (linkedOrgs.length > 0) {
+      orgIds = linkedOrgs.map((org) => org._id);
+    }
+  }
+
+  const conversationFilter = {
+    organizationId: { $in: orgIds },
     toPhone: { $in: phoneMatchVariants },
-  })
-    .sort({ sentAt: 1 })
+  };
+
+  const totalMessages = await Message.countDocuments(conversationFilter);
+  const latestMessages = await Message.find(conversationFilter)
+    .sort({ sentAt: -1, _id: -1 })
     .limit(limit)
     .lean();
+  const messagesInChatOrder = latestMessages.reverse();
+  const messages = messagesInChatOrder.map(mapConversationMessage);
+  const customerName =
+    [...messagesInChatOrder]
+      .reverse()
+      .find((msg) => msg.direction === 'inbound' && msg.customerName)?.customerName || null;
 
   return res.json({
     organizationId: String(req.organization._id),
+    linkedOrganizationIds: orgIds.map((id) => String(id)),
     phoneNumber,
+    customerName,
     count: messages.length,
+    totalMessages,
+    hasMore: totalMessages > messages.length,
     limitRequested: limit,
     messages,
   });
