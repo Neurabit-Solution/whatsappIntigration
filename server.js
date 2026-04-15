@@ -9,6 +9,7 @@ const apiKeyMiddleware = require('./middlewares/apiKey');
 const adminKeyMiddleware = require('./middlewares/adminKey');
 const webhookRoutes = require('./routes/webhook');
 const organizationsRoutes = require('./routes/organizations');
+const organizationQrRoutes = require('./routes/organizationQr');
 const messagesRoutes = require('./routes/messages');
 const leadsRoutes = require('./routes/leads');
 const statsRoutes = require('./routes/stats');
@@ -79,6 +80,7 @@ app.post('/webhook', (req, res) => {
 });
 
 app.use('/webhook', webhookRoutes);
+app.use('/api/organizations/whatsapp', apiKeyMiddleware, organizationQrRoutes);
 app.use('/api/organizations', adminKeyMiddleware, organizationsRoutes);
 app.use('/api/webhook-logs', adminKeyMiddleware, webhookLogsRoutes);
 app.use('/api/messages', apiKeyMiddleware, messagesRoutes);

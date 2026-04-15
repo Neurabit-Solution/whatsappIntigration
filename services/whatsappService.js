@@ -12,6 +12,95 @@ function messageTemplatesUrl(businessAccountId) {
   return `${GRAPH_BASE}/${encodeURIComponent(String(businessAccountId).trim())}/message_templates`;
 }
 
+function messageQrCodesUrl(phoneNumberId) {
+  return `${GRAPH_BASE}/${encodeURIComponent(String(phoneNumberId).trim())}/message_qrdls`;
+}
+
+function normalizeImageFormat(value) {
+  const v = String(value || '')
+    .trim()
+    .toUpperCase();
+  if (v === 'SVG') return 'SVG';
+  return 'PNG';
+}
+
+function extractQrRecord(data) {
+  if (Array.isArray(data?.data) && data.data.length > 0) {
+    return data.data[0];
+  }
+  if (data && typeof data === 'object') {
+    return data;
+  }
+  return {};
+}
+
+/**
+ * Creates a WhatsApp message QR code using Meta Graph API.
+ * @param {object} organization - needs whatsapp.phoneNumberId, whatsapp.accessToken
+ * @param {{ prefilledMessage?: string, imageFormat?: string }} [options]
+ * @returns {Promise<{ ok: true, data: object, qr: object } | { ok: false, status?: number, message: string, metaError?: object }>}
+ */
+async function createMessageQrCode(organization, options = {}) {
+  const w = organization.whatsapp || {};
+  const { phoneNumberId, accessToken } = w;
+  if (!phoneNumberId || !accessToken) {
+    return {
+      ok: false,
+      message: 'WhatsApp phone number ID or access token is missing',
+    };
+  }
+
+  const fallbackMessage = `Hi, I want to chat with ${String(
+    organization.businessName || 'your business'
+  ).trim()}`;
+  const prefilledMessage =
+    typeof options.prefilledMessage === 'string' && options.prefilledMessage.trim()
+      ? options.prefilledMessage.trim()
+      : fallbackMessage;
+  const imageFormat = normalizeImageFormat(options.imageFormat);
+
+  const payload = {
+    prefilled_message: prefilledMessage,
+    generate_qr_image: imageFormat,
+  };
+
+  try {
+    const response = await axios.post(messageQrCodesUrl(phoneNumberId), payload, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      validateStatus: () => true,
+    });
+
+    const data = response.data;
+    if (response.status >= 400 || data?.error) {
+      return {
+        ok: false,
+        status: response.status,
+        message: data?.error?.message || `Meta API error (${response.status})`,
+        metaError: data?.error || null,
+      };
+    }
+
+    const record = extractQrRecord(data);
+    const qr = {
+      code: String(record?.code || ''),
+      deepLinkUrl: String(record?.deep_link_url || record?.deepLinkUrl || ''),
+      qrImageUrl: String(record?.qr_image_url || record?.qrImageUrl || ''),
+      prefilledMessage: String(record?.prefilled_message || prefilledMessage),
+      imageFormat: imageFormat,
+    };
+
+    return { ok: true, data, qr };
+  } catch (err) {
+    return {
+      ok: false,
+      message: err?.message || 'Network error while generating WhatsApp QR',
+    };
+  }
+}
+
 /**
  * Lists WhatsApp message templates for the WABA (Meta Graph API).
  * @param {object} organization - needs whatsapp.businessAccountId, whatsapp.accessToken
@@ -262,6 +351,7 @@ module.exports = {
   sendTemplateMessage,
   buildTemplateMessagePayload,
   listMessageTemplates,
+  createMessageQrCode,
   buildTemplateComponentsFromParameters,
   GRAPH_API_VERSION,
 };
