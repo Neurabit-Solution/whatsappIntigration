@@ -268,6 +268,7 @@ async function receiveWebhook(req, res) {
           try {
             const syncResult = await syncMessageStatusToFirestore(metaId, mapped, {
               recipientPhone: statusRecipientPhone,
+              mongoOrganizationId: organization?._id,
             });
             await recordFirebaseSyncLog({
               organizationId: organization?._id || null,

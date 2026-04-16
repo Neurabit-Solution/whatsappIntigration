@@ -57,6 +57,41 @@ function getFirebaseSyncUids() {
   return parseListEnv(combined);
 }
 
+/** Same collection as `lightLeads/functions/whatsappcrm/upsertWhatsappInboundRouting.js` */
+const WHATSAPP_CRM_INBOUND_ROUTING = 'whatsappCrmInboundRouting';
+
+async function loadInboundRoutingDoc(db, mongoOrganizationId) {
+  const id = String(mongoOrganizationId || '').trim();
+  if (!id) return null;
+  const snap = await db.collection(WHATSAPP_CRM_INBOUND_ROUTING).doc(id).get();
+  if (!snap.exists) return null;
+  return snap.data() || null;
+}
+
+/**
+ * Prefer FIREBASE_SYNC_UID(s) from env; otherwise read routing doc written by Cloud Functions
+ * when startWhatsAppCampaign / sendWhatsAppMessage runs (uses WHATSAPP_ORGANIZATION_ID).
+ */
+async function resolveFirebaseUidsForInbound(db, mongoOrganizationId) {
+  const envUids = getFirebaseSyncUids();
+  if (envUids.length > 0) {
+    return { uids: envUids, source: 'env', routing: null };
+  }
+  const orgId = String(mongoOrganizationId || '').trim();
+  if (!orgId) {
+    return { uids: [], source: 'no_mongo_organization_id', routing: null };
+  }
+  const routing = await loadInboundRoutingDoc(db, orgId);
+  if (routing && String(routing.firebaseUid || '').trim()) {
+    return {
+      uids: [String(routing.firebaseUid).trim()],
+      source: 'firestore_routing',
+      routing,
+    };
+  }
+  return { uids: [], source: 'whatsapp_inbound_routing_missing', routing: null };
+}
+
 function getCampaignIdWhitelist() {
   const raw = String(process.env.FIREBASE_SYNC_CAMPAIGN_IDS || '').trim();
   if (!raw) return null;
@@ -132,31 +167,59 @@ function connectFirestoreOrError() {
   }
 }
 
-async function listCampaignDocsForUser(db, uid) {
+async function listCampaignDocsForUser(db, uid, routingDoc) {
   const campaignsCol = db.collection('users').doc(uid).collection('whatsappCampaigns');
+  const byId = new Map();
+  const preferredCampaignId = routingDoc && String(routingDoc.lastCampaignId || '').trim();
+  if (preferredCampaignId) {
+    const preferredSnap = await campaignsCol.doc(preferredCampaignId).get();
+    if (preferredSnap.exists) {
+      byId.set(preferredSnap.id, preferredSnap);
+    }
+  }
+
   const whitelist = getCampaignIdWhitelist();
   if (whitelist && whitelist.length > 0) {
     const snaps = await Promise.all(whitelist.map((id) => campaignsCol.doc(id).get()));
-    return snaps.filter((s) => s.exists);
+    for (const s of snaps) {
+      if (s.exists) {
+        byId.set(s.id, s);
+      }
+    }
+    return [...byId.values()];
   }
+
   const limit = getCampaignScanLimit();
   const snap = await campaignsCol.orderBy('createdAt', 'desc').limit(limit).get();
-  return snap.docs;
+  for (const d of snap.docs) {
+    if (!byId.has(d.id)) {
+      byId.set(d.id, d);
+    }
+  }
+  return [...byId.values()];
 }
 
 /**
  * Resolves WhatsApp CRM conversation refs without collectionGroup when possible.
  * Collection-group queries can return FAILED_PRECONDITION if indexes / rules are not set up.
+ * @param {import('firebase-admin').firestore.Firestore} db
+ * @param {string} phoneDigits
+ * @param {{ mongoOrganizationId?: string }} [options]
  */
-async function resolveConversationRefsForPhone(db, phoneDigits) {
+async function resolveConversationRefsForPhone(db, phoneDigits, options = {}) {
   const digits = normalizePhone(phoneDigits);
   const variants = new Set(phoneVariants(digits));
   const convDocId = conversationDocId(digits);
-  const uids = getFirebaseSyncUids();
+  const mongoOrganizationId =
+    options.mongoOrganizationId != null ? String(options.mongoOrganizationId).trim() : '';
+
+  const uidResolution = await resolveFirebaseUidsForInbound(db, mongoOrganizationId);
+  const uids = uidResolution.uids;
 
   const result = {
     refs: [],
     strategy: null,
+    uidSource: uidResolution.source,
     uidsConfigured: uids.length > 0,
     collectionGroupAttempted: false,
     collectionGroupError: null,
@@ -171,7 +234,7 @@ async function resolveConversationRefsForPhone(db, phoneDigits) {
     const refs = new Map();
     for (const uid of uids) {
       try {
-        const campaignDocs = await listCampaignDocsForUser(db, uid);
+        const campaignDocs = await listCampaignDocsForUser(db, uid, uidResolution.routing);
         for (const cDoc of campaignDocs) {
           const convRef = cDoc.ref.collection('conversations').doc(convDocId);
           const convSnap = await convRef.get();
@@ -196,7 +259,17 @@ async function resolveConversationRefsForPhone(db, phoneDigits) {
   }
 
   if (!useCollectionGroupFallback()) {
-    result.strategy = uids.length ? 'conversation_not_found' : 'missing_firebase_sync_uid';
+    if (uids.length === 0) {
+      if (uidResolution.source === 'no_mongo_organization_id') {
+        result.strategy = 'missing_mongo_organization_id';
+      } else if (uidResolution.source === 'whatsapp_inbound_routing_missing') {
+        result.strategy = 'whatsapp_inbound_routing_missing';
+      } else {
+        result.strategy = 'missing_firebase_sync_uid';
+      }
+    } else {
+      result.strategy = 'conversation_not_found';
+    }
     return result;
   }
 
@@ -236,10 +309,13 @@ async function syncMessageStatusToFirestore(metaMessageId, status, options = {})
     return conn.result;
   }
   const db = conn.db;
-  const uids = getFirebaseSyncUids();
+  const mongoOrgId = String(options.mongoOrganizationId || '').trim();
 
-  if (uids.length > 0 && recipientDigits) {
-    const resolved = await resolveConversationRefsForPhone(db, recipientDigits);
+  let resolved = null;
+  if (recipientDigits) {
+    resolved = await resolveConversationRefsForPhone(db, recipientDigits, {
+      mongoOrganizationId: mongoOrgId,
+    });
     const messageRefs = [];
     if (resolved.refs.length > 0) {
       for (const convRef of resolved.refs) {
@@ -277,14 +353,25 @@ async function syncMessageStatusToFirestore(metaMessageId, status, options = {})
   }
 
   if (!useCollectionGroupFallback()) {
+    const hasUid =
+      resolved &&
+      (resolved.uidSource === 'env' ||
+        resolved.uidSource === 'firestore_routing' ||
+        resolved.uidsConfigured);
     return {
       synced: false,
-      reason: uids.length ? 'not_found' : 'missing_firebase_sync_uid',
+      reason: !recipientDigits
+        ? 'missing_recipient_phone'
+        : hasUid
+          ? 'not_found'
+          : 'missing_firebase_uid_for_org',
       matchedCount: 0,
-      hint:
-        uids.length && !recipientDigits
-          ? 'Status webhook is missing recipient phone; cannot resolve messages without collectionGroup.'
-          : 'Set FIREBASE_SYNC_UID (Firebase Auth uid) and optionally FIREBASE_SYNC_CAMPAIGN_IDS, or set FIREBASE_USE_COLLECTION_GROUP=true after creating required Firestore indexes.',
+      resolve: resolved,
+      hint: !recipientDigits
+        ? 'Meta status payload did not include recipient_id; cannot match messages without collectionGroup.'
+        : resolved?.uidSource === 'whatsapp_inbound_routing_missing'
+          ? 'Deploy LightLeads functions so startWhatsAppCampaign writes whatsappCrmInboundRouting/{WHATSAPP_ORGANIZATION_ID}, or set FIREBASE_SYNC_UID on the WhatsApp server.'
+          : 'Set FIREBASE_SYNC_UID or FIREBASE_USE_COLLECTION_GROUP=true after indexes exist.',
     };
   }
 
@@ -334,7 +421,11 @@ async function syncInboundMessageToFirestore(message) {
     return conn.result;
   }
   const db = conn.db;
-  const resolved = await resolveConversationRefsForPhone(db, digits);
+  const mongoOrgId =
+    message.organizationId != null ? String(message.organizationId).trim() : '';
+  const resolved = await resolveConversationRefsForPhone(db, digits, {
+    mongoOrganizationId: mongoOrgId,
+  });
   const conversationRefs = resolved.refs;
   if (conversationRefs.length === 0) {
     if (resolved.collectionGroupError || resolved.pathScanError) {
@@ -342,6 +433,23 @@ async function syncInboundMessageToFirestore(message) {
         synced: false,
         reason: 'firestore_query_failed',
         matchedCount: 0,
+        resolve: resolved,
+      };
+    }
+    const uidMissingStrategies = new Set([
+      'missing_firebase_sync_uid',
+      'whatsapp_inbound_routing_missing',
+      'missing_mongo_organization_id',
+    ]);
+    if (uidMissingStrategies.has(resolved.strategy)) {
+      return {
+        synced: false,
+        reason: resolved.strategy,
+        matchedCount: 0,
+        hint:
+          resolved.strategy === 'whatsapp_inbound_routing_missing'
+            ? 'LightLeads must write Firestore doc whatsappCrmInboundRouting/{mongoOrgId} when startWhatsAppCampaign runs (uses WHATSAPP_ORGANIZATION_ID). Deploy updated functions, or set FIREBASE_SYNC_UID on the WhatsApp server.'
+            : 'Set FIREBASE_SYNC_UID to the LightLeads Firebase Auth uid, or ensure routing doc / organizationId is present.',
         resolve: resolved,
       };
     }
