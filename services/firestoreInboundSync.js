@@ -1,6 +1,6 @@
 const admin = require('firebase-admin');
 const crypto = require('crypto');
-const { FieldPath, Timestamp } = require('firebase-admin/firestore');
+const { Timestamp } = require('firebase-admin/firestore');
 const { getFirestore } = require('./firebaseAdmin');
 
 function normalizePhone(value) {
@@ -47,20 +47,18 @@ function timestampToMillis(value) {
 
 async function getMatchingConversationRefs(db, phone) {
   const refs = new Map();
-  const queries = [];
   const digits = normalizePhone(phone);
-  const conversationId = conversationDocId(digits);
-
-  if (conversationId) {
-    queries.push(db.collectionGroup('conversations').where(FieldPath.documentId(), '==', conversationId).get());
+  const variants = phoneVariants(digits);
+  if (variants.length === 0) {
+    return [];
   }
-
-  for (const variant of phoneVariants(digits)) {
-    queries.push(db.collectionGroup('conversations').where('phone', '==', variant).get());
-  }
-
-  const snapshots = await Promise.all(queries);
-  for (const snap of snapshots) {
+  // NOTE:
+  // For collectionGroup queries, FieldPath.documentId() requires a full document path.
+  // Querying with only "7524807719" throws:
+  // "value must result in a valid document path".
+  // So we query by phone variants only and dedupe by full ref path.
+  for (const variant of variants) {
+    const snap = await db.collectionGroup('conversations').where('phone', '==', variant).get();
     for (const doc of snap.docs) {
       refs.set(doc.ref.path, doc.ref);
     }
