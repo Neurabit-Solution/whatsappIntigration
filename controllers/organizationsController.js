@@ -52,22 +52,30 @@ async function updateWhatsAppConfig(req, res) {
     return res.status(404).json({ error: 'Organization not found' });
   }
 
-  const duplicateOrg = await Organization.findOne({
-    _id: { $ne: req.params.id },
-    isActive: true,
-    'whatsapp.businessAccountId': normalizedBusinessAccountId,
-    'whatsapp.phoneNumberId': normalizedPhoneNumberId,
-  })
-    .select({ _id: 1, businessName: 1 })
-    .lean();
-  if (duplicateOrg) {
-    return res.status(409).json({
-      error:
-        'This WhatsApp businessAccountId + phoneNumberId is already linked to another active organization',
-      existingOrganizationId: duplicateOrg._id,
-      existingBusinessName: duplicateOrg.businessName,
-      hint: 'Use the same organization API key for messaging/webhook, or disable the old org first.',
-    });
+  const allowDup =
+    String(process.env.ALLOW_DUPLICATE_WHATSAPP_ACROSS_ORGS || '')
+      .trim()
+      .toLowerCase() === 'true' ||
+    String(process.env.ALLOW_DUPLICATE_WHATSAPP_ACROSS_ORGS || '').trim() === '1';
+
+  if (!allowDup) {
+    const duplicateOrg = await Organization.findOne({
+      _id: { $ne: req.params.id },
+      isActive: true,
+      'whatsapp.businessAccountId': normalizedBusinessAccountId,
+      'whatsapp.phoneNumberId': normalizedPhoneNumberId,
+    })
+      .select({ _id: 1, businessName: 1 })
+      .lean();
+    if (duplicateOrg) {
+      return res.status(409).json({
+        error:
+          'This WhatsApp businessAccountId + phoneNumberId is already linked to another active organization',
+        existingOrganizationId: duplicateOrg._id,
+        existingBusinessName: duplicateOrg.businessName,
+        hint: 'Use the same organization API key for messaging/webhook, or disable the old org first. To allow the same Meta line on multiple orgs, set ALLOW_DUPLICATE_WHATSAPP_ACROSS_ORGS=1 on the server.',
+      });
+    }
   }
 
   const update = {

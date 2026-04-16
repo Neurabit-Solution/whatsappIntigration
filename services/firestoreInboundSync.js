@@ -68,28 +68,59 @@ async function loadInboundRoutingDoc(db, mongoOrganizationId) {
   return snap.data() || null;
 }
 
+function collectMongoOrganizationIdsForResolve(options = {}) {
+  const ids = new Set();
+  const single = options.mongoOrganizationId;
+  if (single != null && String(single).trim()) {
+    ids.add(String(single).trim());
+  }
+  const list = options.mongoOrganizationIds;
+  if (Array.isArray(list)) {
+    for (const x of list) {
+      if (x != null && String(x).trim()) {
+        ids.add(String(x).trim());
+      }
+    }
+  }
+  return [...ids];
+}
+
 /**
  * Prefer FIREBASE_SYNC_UID(s) from env; otherwise read routing doc written by Cloud Functions
  * when startWhatsAppCampaign / sendWhatsAppMessage runs (uses WHATSAPP_ORGANIZATION_ID).
+ * @param {import('firebase-admin').firestore.Firestore} db
+ * @param {string|string[]} mongoOrganizationIdOrIds
  */
-async function resolveFirebaseUidsForInbound(db, mongoOrganizationId) {
+async function resolveFirebaseUidsForInbound(db, mongoOrganizationIdOrIds) {
   const envUids = getFirebaseSyncUids();
   if (envUids.length > 0) {
     return { uids: envUids, source: 'env', routing: null };
   }
-  const orgId = String(mongoOrganizationId || '').trim();
-  if (!orgId) {
-    return { uids: [], source: 'no_mongo_organization_id', routing: null };
+  const orgIds = Array.isArray(mongoOrganizationIdOrIds)
+    ? mongoOrganizationIdOrIds.map((x) => String(x || '').trim()).filter(Boolean)
+    : [String(mongoOrganizationIdOrIds || '').trim()].filter(Boolean);
+
+  if (orgIds.length === 0) {
+    return { uids: [], source: 'no_mongo_organization_id', routing: null, attemptedOrgIds: [] };
   }
-  const routing = await loadInboundRoutingDoc(db, orgId);
-  if (routing && String(routing.firebaseUid || '').trim()) {
-    return {
-      uids: [String(routing.firebaseUid).trim()],
-      source: 'firestore_routing',
-      routing,
-    };
+
+  for (const orgId of orgIds) {
+    const routing = await loadInboundRoutingDoc(db, orgId);
+    if (routing && String(routing.firebaseUid || '').trim()) {
+      return {
+        uids: [String(routing.firebaseUid).trim()],
+        source: 'firestore_routing',
+        routing,
+        routingOrgId: orgId,
+      };
+    }
   }
-  return { uids: [], source: 'whatsapp_inbound_routing_missing', routing: null };
+  return {
+    uids: [],
+    source: 'whatsapp_inbound_routing_missing',
+    routing: null,
+    attemptedOrgIds: orgIds,
+  };
 }
 
 function getCampaignIdWhitelist() {
@@ -210,10 +241,9 @@ async function resolveConversationRefsForPhone(db, phoneDigits, options = {}) {
   const digits = normalizePhone(phoneDigits);
   const variants = new Set(phoneVariants(digits));
   const convDocId = conversationDocId(digits);
-  const mongoOrganizationId =
-    options.mongoOrganizationId != null ? String(options.mongoOrganizationId).trim() : '';
+  const mongoOrgIds = collectMongoOrganizationIdsForResolve(options);
 
-  const uidResolution = await resolveFirebaseUidsForInbound(db, mongoOrganizationId);
+  const uidResolution = await resolveFirebaseUidsForInbound(db, mongoOrgIds);
   const uids = uidResolution.uids;
 
   const result = {
@@ -309,12 +339,12 @@ async function syncMessageStatusToFirestore(metaMessageId, status, options = {})
     return conn.result;
   }
   const db = conn.db;
-  const mongoOrgId = String(options.mongoOrganizationId || '').trim();
 
   let resolved = null;
   if (recipientDigits) {
     resolved = await resolveConversationRefsForPhone(db, recipientDigits, {
-      mongoOrganizationId: mongoOrgId,
+      mongoOrganizationId: options.mongoOrganizationId,
+      mongoOrganizationIds: options.mongoOrganizationIds,
     });
     const messageRefs = [];
     if (resolved.refs.length > 0) {
@@ -370,7 +400,7 @@ async function syncMessageStatusToFirestore(metaMessageId, status, options = {})
       hint: !recipientDigits
         ? 'Meta status payload did not include recipient_id; cannot match messages without collectionGroup.'
         : resolved?.uidSource === 'whatsapp_inbound_routing_missing'
-          ? 'Deploy LightLeads functions so startWhatsAppCampaign writes whatsappCrmInboundRouting/{WHATSAPP_ORGANIZATION_ID}, or set FIREBASE_SYNC_UID on the WhatsApp server.'
+          ? 'Deploy LightLeads functions so startWhatsAppCampaign writes whatsappCrmInboundRouting/{WHATSAPP_ORGANIZATION_ID}, set FIREBASE_ROUTING_ORGANIZATION_IDS to extra Mongo org ids, or set FIREBASE_SYNC_UID on the WhatsApp server.'
           : 'Set FIREBASE_SYNC_UID or FIREBASE_USE_COLLECTION_GROUP=true after indexes exist.',
     };
   }
@@ -421,10 +451,9 @@ async function syncInboundMessageToFirestore(message) {
     return conn.result;
   }
   const db = conn.db;
-  const mongoOrgId =
-    message.organizationId != null ? String(message.organizationId).trim() : '';
   const resolved = await resolveConversationRefsForPhone(db, digits, {
-    mongoOrganizationId: mongoOrgId,
+    mongoOrganizationId: message.organizationId,
+    mongoOrganizationIds: message.mongoOrganizationIds,
   });
   const conversationRefs = resolved.refs;
   if (conversationRefs.length === 0) {
@@ -448,7 +477,7 @@ async function syncInboundMessageToFirestore(message) {
         matchedCount: 0,
         hint:
           resolved.strategy === 'whatsapp_inbound_routing_missing'
-            ? 'LightLeads must write Firestore doc whatsappCrmInboundRouting/{mongoOrgId} when startWhatsAppCampaign runs (uses WHATSAPP_ORGANIZATION_ID). Deploy updated functions, or set FIREBASE_SYNC_UID on the WhatsApp server.'
+            ? 'LightLeads must write Firestore doc whatsappCrmInboundRouting/{mongoOrgId} when startWhatsAppCampaign runs (uses WHATSAPP_ORGANIZATION_ID). If webhook org id differs, set FIREBASE_ROUTING_ORGANIZATION_IDS, deploy updated functions, or set FIREBASE_SYNC_UID on the WhatsApp server.'
             : 'Set FIREBASE_SYNC_UID to the LightLeads Firebase Auth uid, or ensure routing doc / organizationId is present.',
         resolve: resolved,
       };

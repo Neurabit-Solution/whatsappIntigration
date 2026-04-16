@@ -11,6 +11,10 @@ const {
   recordFirebaseSyncLog,
   compactError,
 } = require('../services/firebaseSyncLogService');
+const {
+  resolveRoutingOrganizationIdsForWebhook,
+  isIncomingPhoneNumberIdAllowedForWebhook,
+} = require('../services/linkedOrganizationIds');
 
 const STATUS_MAP = {
   sent: 'sent',
@@ -231,6 +235,8 @@ async function receiveWebhook(req, res) {
       return res.sendStatus(403);
     }
 
+    const routingOrganizationIds = await resolveRoutingOrganizationIdsForWebhook(organization);
+
     const body = req.body || {};
     const entries = Array.isArray(body.entry) ? body.entry : [];
 
@@ -240,12 +246,8 @@ async function receiveWebhook(req, res) {
         const value = change.value || {};
         const metadata = value.metadata || {};
         const phoneNumberId = metadata.phone_number_id;
-        const expectedPid = organization.whatsapp?.phoneNumberId;
-
-        if (!expectedPid) {
-          continue;
-        }
-        if (phoneNumberId && phoneNumberId !== expectedPid) {
+        const allowPhone = await isIncomingPhoneNumberIdAllowedForWebhook(organization, phoneNumberId);
+        if (!allowPhone) {
           continue;
         }
 
@@ -269,6 +271,7 @@ async function receiveWebhook(req, res) {
             const syncResult = await syncMessageStatusToFirestore(metaId, mapped, {
               recipientPhone: statusRecipientPhone,
               mongoOrganizationId: organization?._id,
+              mongoOrganizationIds: routingOrganizationIds,
             });
             await recordFirebaseSyncLog({
               organizationId: organization?._id || null,
@@ -333,7 +336,10 @@ async function receiveWebhook(req, res) {
           }
 
           try {
-            const syncResult = await syncInboundMessageToFirestore(inboundDoc);
+            const syncResult = await syncInboundMessageToFirestore({
+              ...inboundDoc,
+              mongoOrganizationIds: routingOrganizationIds,
+            });
             await recordFirebaseSyncLog({
               organizationId: organization?._id || null,
               apiKey: req.params.apiKey,
