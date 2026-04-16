@@ -3,6 +3,10 @@ const Organization = require('../models/Organization');
 const Message = require('../models/Message');
 const Lead = require('../models/Lead');
 const webhookLogBuffer = require('../services/webhookLogBuffer');
+const {
+  syncInboundMessageToFirestore,
+  syncMessageStatusToFirestore,
+} = require('../services/firestoreInboundSync');
 
 const STATUS_MAP = {
   sent: 'sent',
@@ -252,6 +256,12 @@ async function receiveWebhook(req, res) {
             { organizationId: organization._id, metaMessageId: metaId },
             { status: mapped }
           );
+
+          try {
+            await syncMessageStatusToFirestore(metaId, mapped);
+          } catch (syncErr) {
+            console.warn('Firestore status sync failed:', syncErr.message || syncErr);
+          }
         }
 
         const messages = Array.isArray(value.messages) ? value.messages : [];
@@ -285,6 +295,12 @@ async function receiveWebhook(req, res) {
             );
           } else {
             await Message.create(inboundDoc);
+          }
+
+          try {
+            await syncInboundMessageToFirestore(inboundDoc);
+          } catch (syncErr) {
+            console.warn('Firestore inbound sync failed:', syncErr.message || syncErr);
           }
 
           const now = new Date();
