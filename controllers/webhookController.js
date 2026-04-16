@@ -256,20 +256,26 @@ async function receiveWebhook(req, res) {
           const mapped = STATUS_MAP[raw];
           if (!metaId || !mapped) continue;
 
+          const statusRecipientPhone = normalizePhone(
+            st.recipient_id || st.recipientId || st.recipient_phone || ''
+          );
+
           await Message.findOneAndUpdate(
             { organizationId: organization._id, metaMessageId: metaId },
             { status: mapped }
           );
 
           try {
-            const syncResult = await syncMessageStatusToFirestore(metaId, mapped);
+            const syncResult = await syncMessageStatusToFirestore(metaId, mapped, {
+              recipientPhone: statusRecipientPhone,
+            });
             await recordFirebaseSyncLog({
               organizationId: organization?._id || null,
               apiKey: req.params.apiKey,
               operation: 'status_sync',
               ok: syncResult?.synced === true,
               reason: syncResult?.reason || null,
-              phone: null,
+              phone: statusRecipientPhone || null,
               messageType: null,
               metaMessageId: metaId,
               status: mapped,
@@ -283,7 +289,7 @@ async function receiveWebhook(req, res) {
               operation: 'status_sync',
               ok: false,
               reason: 'exception',
-              phone: null,
+              phone: statusRecipientPhone || null,
               messageType: null,
               metaMessageId: metaId,
               status: mapped,

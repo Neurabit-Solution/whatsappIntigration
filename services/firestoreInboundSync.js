@@ -1,7 +1,7 @@
 const admin = require('firebase-admin');
 const crypto = require('crypto');
 const { Timestamp } = require('firebase-admin/firestore');
-const { getFirestore } = require('./firebaseAdmin');
+const { getFirestore, validateFirebaseAdminConfig } = require('./firebaseAdmin');
 
 function normalizePhone(value) {
   return String(value || '').replace(/\D/g, '');
@@ -45,59 +45,282 @@ function timestampToMillis(value) {
   return null;
 }
 
-async function getMatchingConversationRefs(db, phone) {
-  const refs = new Map();
-  const digits = normalizePhone(phone);
-  const variants = phoneVariants(digits);
-  if (variants.length === 0) {
-    return [];
+function parseListEnv(value) {
+  return String(value || '')
+    .split(/[,;\s]+/g)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function getFirebaseSyncUids() {
+  const combined = `${process.env.FIREBASE_SYNC_UIDS || ''} ${process.env.FIREBASE_SYNC_UID || ''}`;
+  return parseListEnv(combined);
+}
+
+function getCampaignIdWhitelist() {
+  const raw = String(process.env.FIREBASE_SYNC_CAMPAIGN_IDS || '').trim();
+  if (!raw) return null;
+  return parseListEnv(raw);
+}
+
+function getCampaignScanLimit() {
+  const n = Number(process.env.FIREBASE_SYNC_CAMPAIGN_SCAN_LIMIT || 50);
+  if (!Number.isFinite(n)) return 50;
+  return Math.min(200, Math.max(1, Math.floor(n)));
+}
+
+function useCollectionGroupFallback() {
+  const v = String(process.env.FIREBASE_USE_COLLECTION_GROUP || '')
+    .trim()
+    .toLowerCase();
+  if (!v) return false;
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
+function summarizeFirestoreError(err) {
+  if (!err) return null;
+  const out = {
+    message: String(err.message || err),
+    code: err.code != null ? String(err.code) : null,
+    details: err.details != null ? err.details : null,
+  };
+  if (err.metadata && typeof err.metadata.getMap === 'function') {
+    try {
+      out.metadata = err.metadata.getMap();
+    } catch {
+      /* ignore */
+    }
   }
-  // NOTE:
-  // For collectionGroup queries, FieldPath.documentId() requires a full document path.
-  // Querying with only "7524807719" throws:
-  // "value must result in a valid document path".
-  // So we query by phone variants only and dedupe by full ref path.
-  for (const variant of variants) {
-    const snap = await db.collectionGroup('conversations').where('phone', '==', variant).get();
-    for (const doc of snap.docs) {
-      refs.set(doc.ref.path, doc.ref);
+  return out;
+}
+
+function connectFirestoreOrError() {
+  const cfg = validateFirebaseAdminConfig();
+  if (!cfg.ok) {
+    return {
+      ok: false,
+      result: {
+        synced: false,
+        reason: cfg.code,
+        matchedCount: 0,
+        credentials: {
+          code: cfg.code,
+          message: cfg.message,
+          missing: cfg.missing,
+          diagnostics: cfg.diagnostics,
+        },
+      },
+    };
+  }
+
+  try {
+    return { ok: true, db: getFirestore(), credentialsDiagnostics: cfg.diagnostics || null };
+  } catch (err) {
+    return {
+      ok: false,
+      result: {
+        synced: false,
+        reason: 'firebase_admin_init_failed',
+        matchedCount: 0,
+        credentials: {
+          code: 'firebase_admin_init_failed',
+          diagnostics: cfg.diagnostics || null,
+        },
+        error: summarizeFirestoreError(err),
+      },
+    };
+  }
+}
+
+async function listCampaignDocsForUser(db, uid) {
+  const campaignsCol = db.collection('users').doc(uid).collection('whatsappCampaigns');
+  const whitelist = getCampaignIdWhitelist();
+  if (whitelist && whitelist.length > 0) {
+    const snaps = await Promise.all(whitelist.map((id) => campaignsCol.doc(id).get()));
+    return snaps.filter((s) => s.exists);
+  }
+  const limit = getCampaignScanLimit();
+  const snap = await campaignsCol.orderBy('createdAt', 'desc').limit(limit).get();
+  return snap.docs;
+}
+
+/**
+ * Resolves WhatsApp CRM conversation refs without collectionGroup when possible.
+ * Collection-group queries can return FAILED_PRECONDITION if indexes / rules are not set up.
+ */
+async function resolveConversationRefsForPhone(db, phoneDigits) {
+  const digits = normalizePhone(phoneDigits);
+  const variants = new Set(phoneVariants(digits));
+  const convDocId = conversationDocId(digits);
+  const uids = getFirebaseSyncUids();
+
+  const result = {
+    refs: [],
+    strategy: null,
+    uidsConfigured: uids.length > 0,
+    collectionGroupAttempted: false,
+    collectionGroupError: null,
+  };
+
+  if (!digits) {
+    result.strategy = 'missing_phone';
+    return result;
+  }
+
+  if (uids.length > 0 && convDocId) {
+    const refs = new Map();
+    for (const uid of uids) {
+      try {
+        const campaignDocs = await listCampaignDocsForUser(db, uid);
+        for (const cDoc of campaignDocs) {
+          const convRef = cDoc.ref.collection('conversations').doc(convDocId);
+          const convSnap = await convRef.get();
+          if (!convSnap.exists) continue;
+          const stored = normalizePhone(convSnap.get('phone'));
+          if (!stored || variants.has(stored)) {
+            refs.set(convRef.path, convRef);
+          }
+        }
+      } catch (err) {
+        result.pathScanError = summarizeFirestoreError(err);
+        result.strategy = 'path_scan_failed';
+        result.refs = [];
+        return result;
+      }
+    }
+    result.refs = [...refs.values()];
+    result.strategy = 'user_campaign_path';
+    if (result.refs.length > 0) {
+      return result;
     }
   }
 
-  return [...refs.values()];
+  if (!useCollectionGroupFallback()) {
+    result.strategy = uids.length ? 'conversation_not_found' : 'missing_firebase_sync_uid';
+    return result;
+  }
+
+  result.collectionGroupAttempted = true;
+  const refs = new Map();
+  try {
+    for (const variant of phoneVariants(digits)) {
+      const snap = await db.collectionGroup('conversations').where('phone', '==', variant).get();
+      for (const doc of snap.docs) {
+        refs.set(doc.ref.path, doc.ref);
+      }
+    }
+    result.refs = [...refs.values()];
+    result.strategy = 'collection_group';
+  } catch (err) {
+    result.collectionGroupError = summarizeFirestoreError(err);
+    result.strategy = 'collection_group_failed';
+    result.refs = [];
+  }
+
+  return result;
 }
 
-async function syncMessageStatusToFirestore(metaMessageId, status) {
+async function syncMessageStatusToFirestore(metaMessageId, status, options = {}) {
   const normalizedMetaMessageId = String(metaMessageId || '').trim();
   const normalizedStatus = String(status || '').trim();
   if (!normalizedMetaMessageId || !normalizedStatus) {
     return { synced: false, reason: 'missing_message_identity' };
   }
 
-  const db = getFirestore();
-  const matches = await db
-    .collectionGroup('messages')
-    .where('metaMessageId', '==', normalizedMetaMessageId)
-    .get();
+  const recipientDigits = normalizePhone(
+    options.recipientPhone || options.recipientId || options.recipient_id || ''
+  );
 
-  if (matches.empty) {
-    return { synced: false, reason: 'not_found', matchedCount: 0 };
+  const conn = connectFirestoreOrError();
+  if (!conn.ok) {
+    return conn.result;
+  }
+  const db = conn.db;
+  const uids = getFirebaseSyncUids();
+
+  if (uids.length > 0 && recipientDigits) {
+    const resolved = await resolveConversationRefsForPhone(db, recipientDigits);
+    const messageRefs = [];
+    if (resolved.refs.length > 0) {
+      for (const convRef of resolved.refs) {
+        const snap = await convRef
+          .collection('messages')
+          .where('metaMessageId', '==', normalizedMetaMessageId)
+          .limit(25)
+          .get();
+        for (const doc of snap.docs) {
+          messageRefs.push(doc.ref);
+        }
+      }
+    }
+
+    if (messageRefs.length > 0) {
+      const batch = db.batch();
+      for (const ref of messageRefs) {
+        batch.set(
+          ref,
+          {
+            status: normalizedStatus,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+      }
+      await batch.commit();
+      return {
+        synced: true,
+        matchedCount: messageRefs.length,
+        strategy: 'user_campaign_messages_query',
+        conversationStrategy: resolved.strategy,
+      };
+    }
   }
 
-  const batch = db.batch();
-  for (const doc of matches.docs) {
-    batch.set(
-      doc.ref,
-      {
-        status: normalizedStatus,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
+  if (!useCollectionGroupFallback()) {
+    return {
+      synced: false,
+      reason: uids.length ? 'not_found' : 'missing_firebase_sync_uid',
+      matchedCount: 0,
+      hint:
+        uids.length && !recipientDigits
+          ? 'Status webhook is missing recipient phone; cannot resolve messages without collectionGroup.'
+          : 'Set FIREBASE_SYNC_UID (Firebase Auth uid) and optionally FIREBASE_SYNC_CAMPAIGN_IDS, or set FIREBASE_USE_COLLECTION_GROUP=true after creating required Firestore indexes.',
+    };
   }
-  await batch.commit();
 
-  return { synced: true, matchedCount: matches.size };
+  try {
+    const matches = await db
+      .collectionGroup('messages')
+      .where('metaMessageId', '==', normalizedMetaMessageId)
+      .get();
+
+    if (matches.empty) {
+      return { synced: false, reason: 'not_found', matchedCount: 0, strategy: 'collection_group' };
+    }
+
+    const batch = db.batch();
+    for (const doc of matches.docs) {
+      batch.set(
+        doc.ref,
+        {
+          status: normalizedStatus,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+    }
+    await batch.commit();
+
+    return { synced: true, matchedCount: matches.size, strategy: 'collection_group' };
+  } catch (err) {
+    return {
+      synced: false,
+      reason: 'firestore_query_failed',
+      matchedCount: 0,
+      strategy: 'collection_group',
+      error: summarizeFirestoreError(err),
+    };
+  }
 }
 
 async function syncInboundMessageToFirestore(message) {
@@ -106,10 +329,28 @@ async function syncInboundMessageToFirestore(message) {
     return { synced: false, reason: 'missing_phone' };
   }
 
-  const db = getFirestore();
-  const conversationRefs = await getMatchingConversationRefs(db, digits);
+  const conn = connectFirestoreOrError();
+  if (!conn.ok) {
+    return conn.result;
+  }
+  const db = conn.db;
+  const resolved = await resolveConversationRefsForPhone(db, digits);
+  const conversationRefs = resolved.refs;
   if (conversationRefs.length === 0) {
-    return { synced: false, reason: 'conversation_not_found', matchedCount: 0 };
+    if (resolved.collectionGroupError || resolved.pathScanError) {
+      return {
+        synced: false,
+        reason: 'firestore_query_failed',
+        matchedCount: 0,
+        resolve: resolved,
+      };
+    }
+    return {
+      synced: false,
+      reason: 'conversation_not_found',
+      matchedCount: 0,
+      resolve: resolved,
+    };
   }
 
   const sentAtDate = message?.sentAt instanceof Date ? message.sentAt : new Date(message?.sentAt || Date.now());
