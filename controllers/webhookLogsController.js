@@ -1,4 +1,8 @@
 const webhookLogBuffer = require('../services/webhookLogBuffer');
+const {
+  listFirebaseSyncLogs,
+  clearFirebaseSyncLogs,
+} = require('../services/firebaseSyncLogService');
 
 function hostnameOnly(hostHeader) {
   const h = String(hostHeader || '').trim();
@@ -123,7 +127,19 @@ function clearWebhookLogs(req, res) {
   return res.json({ ok: true, cleared: true });
 }
 
+async function listFirebaseLogs(req, res) {
+  const data = await listFirebaseSyncLogs(req.query || {});
+  return res.json(data);
+}
+
+async function clearFirebaseLogs(req, res) {
+  const deletedCount = await clearFirebaseSyncLogs();
+  return res.json({ ok: true, cleared: true, deletedCount });
+}
+
 module.exports = {
   listWebhookLogs,
   clearWebhookLogs,
+  listFirebaseLogs,
+  clearFirebaseLogs,
 };

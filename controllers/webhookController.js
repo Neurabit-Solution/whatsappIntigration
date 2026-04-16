@@ -7,6 +7,10 @@ const {
   syncInboundMessageToFirestore,
   syncMessageStatusToFirestore,
 } = require('../services/firestoreInboundSync');
+const {
+  recordFirebaseSyncLog,
+  compactError,
+} = require('../services/firebaseSyncLogService');
 
 const STATUS_MAP = {
   sent: 'sent',
@@ -258,9 +262,33 @@ async function receiveWebhook(req, res) {
           );
 
           try {
-            await syncMessageStatusToFirestore(metaId, mapped);
+            const syncResult = await syncMessageStatusToFirestore(metaId, mapped);
+            await recordFirebaseSyncLog({
+              organizationId: organization?._id || null,
+              apiKey: req.params.apiKey,
+              operation: 'status_sync',
+              ok: syncResult?.synced === true,
+              reason: syncResult?.reason || null,
+              phone: null,
+              messageType: null,
+              metaMessageId: metaId,
+              status: mapped,
+              details: syncResult,
+            });
           } catch (syncErr) {
             console.warn('Firestore status sync failed:', syncErr.message || syncErr);
+            await recordFirebaseSyncLog({
+              organizationId: organization?._id || null,
+              apiKey: req.params.apiKey,
+              operation: 'status_sync',
+              ok: false,
+              reason: 'exception',
+              phone: null,
+              messageType: null,
+              metaMessageId: metaId,
+              status: mapped,
+              details: { error: compactError(syncErr) },
+            });
           }
         }
 
@@ -298,9 +326,33 @@ async function receiveWebhook(req, res) {
           }
 
           try {
-            await syncInboundMessageToFirestore(inboundDoc);
+            const syncResult = await syncInboundMessageToFirestore(inboundDoc);
+            await recordFirebaseSyncLog({
+              organizationId: organization?._id || null,
+              apiKey: req.params.apiKey,
+              operation: 'inbound_sync',
+              ok: syncResult?.synced === true,
+              reason: syncResult?.reason || null,
+              phone: inboundDoc.toPhone,
+              messageType: inboundDoc.messageType,
+              metaMessageId: inboundDoc.metaMessageId,
+              status: inboundDoc.status,
+              details: syncResult,
+            });
           } catch (syncErr) {
             console.warn('Firestore inbound sync failed:', syncErr.message || syncErr);
+            await recordFirebaseSyncLog({
+              organizationId: organization?._id || null,
+              apiKey: req.params.apiKey,
+              operation: 'inbound_sync',
+              ok: false,
+              reason: 'exception',
+              phone: inboundDoc.toPhone,
+              messageType: inboundDoc.messageType,
+              metaMessageId: inboundDoc.metaMessageId,
+              status: inboundDoc.status,
+              details: { error: compactError(syncErr) },
+            });
           }
 
           const now = new Date();
