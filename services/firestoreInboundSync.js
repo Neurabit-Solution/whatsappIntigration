@@ -2,6 +2,13 @@ const admin = require('firebase-admin');
 const crypto = require('crypto');
 const { Timestamp } = require('firebase-admin/firestore');
 const { getFirestore, validateFirebaseAdminConfig } = require('./firebaseAdmin');
+const {
+  applyConversationCrmTransition,
+  normalizeConversationCrmStage,
+  nextStageFromInbound,
+  crmSummaryIncrements,
+  bootstrapCrmSummaryForStage,
+} = require('./firestoreConversationCrm');
 
 function normalizePhone(value) {
   return String(value || '').replace(/\D/g, '');
@@ -323,6 +330,25 @@ async function resolveConversationRefsForPhone(db, phoneDigits, options = {}) {
   return result;
 }
 
+/**
+ * @param {import('firebase-admin').firestore.Firestore} db
+ * @param {import('firebase-admin').firestore.DocumentReference[]} messageRefs
+ * @param {string} normalizedStatus
+ */
+async function applyReadReceiptCrmIfNeeded(db, messageRefs, normalizedStatus) {
+  if (String(normalizedStatus || '').trim().toLowerCase() !== 'read') return;
+  if (!Array.isArray(messageRefs) || messageRefs.length === 0) return;
+  const FieldValue = admin.firestore.FieldValue;
+  const seenPaths = new Set();
+  for (const msgRef of messageRefs) {
+    const convRef = msgRef.parent.parent;
+    const p = convRef.path;
+    if (seenPaths.has(p)) continue;
+    seenPaths.add(p);
+    await applyConversationCrmTransition(db, convRef, 'read', FieldValue);
+  }
+}
+
 async function syncMessageStatusToFirestore(metaMessageId, status, options = {}) {
   const normalizedMetaMessageId = String(metaMessageId || '').trim();
   const normalizedStatus = String(status || '').trim();
@@ -373,6 +399,7 @@ async function syncMessageStatusToFirestore(metaMessageId, status, options = {})
         );
       }
       await batch.commit();
+      await applyReadReceiptCrmIfNeeded(db, messageRefs, normalizedStatus);
       return {
         synced: true,
         matchedCount: messageRefs.length,
@@ -427,6 +454,12 @@ async function syncMessageStatusToFirestore(metaMessageId, status, options = {})
       );
     }
     await batch.commit();
+
+    await applyReadReceiptCrmIfNeeded(
+      db,
+      matches.docs.map((d) => d.ref),
+      normalizedStatus
+    );
 
     return { synced: true, matchedCount: matches.size, strategy: 'collection_group' };
   } catch (err) {
@@ -501,6 +534,8 @@ async function syncInboundMessageToFirestore(message) {
 
     await db.runTransaction(async (tx) => {
       const conversationSnap = await tx.get(conversationRef);
+      const campRef = conversationRef.parent.parent;
+      const campaignSnap = await tx.get(campRef);
       const existingLastMessageMs = timestampToMillis(conversationSnap.get('lastMessageAt'));
       const incomingMessageMs = sentAtDate.getTime();
 
@@ -533,6 +568,43 @@ async function syncInboundMessageToFirestore(message) {
       if (existingLastMessageMs === null || incomingMessageMs >= existingLastMessageMs) {
         conversationPatch.lastMessageAt = eventTimestamp;
         conversationPatch.lastMessagePreview = preview;
+      }
+
+      if (campaignSnap.exists) {
+        const oldStage = normalizeConversationCrmStage(conversationSnap.get('crmStage'));
+        const newStage = nextStageFromInbound(oldStage);
+        if (oldStage !== newStage) {
+          conversationPatch.crmStage = newStage;
+          conversationPatch.crmStageUpdatedAt = admin.firestore.FieldValue.serverTimestamp();
+          conversationPatch.crmRepliedAt = admin.firestore.FieldValue.serverTimestamp();
+
+          const hadSummary =
+            campaignSnap.get('crmSummary') != null &&
+            typeof campaignSnap.get('crmSummary') === 'object';
+          if (!hadSummary) {
+            tx.set(
+              campRef,
+              {
+                crmSummary: bootstrapCrmSummaryForStage(newStage),
+                replied: admin.firestore.FieldValue.increment(1),
+              },
+              { merge: true }
+            );
+          } else {
+            tx.set(
+              campRef,
+              {
+                ...crmSummaryIncrements(
+                  admin.firestore.FieldValue,
+                  oldStage,
+                  newStage
+                ),
+                replied: admin.firestore.FieldValue.increment(1),
+              },
+              { merge: true }
+            );
+          }
+        }
       }
 
       tx.set(conversationRef, conversationPatch, { merge: true });
